@@ -1,3 +1,18 @@
+## KataRank: Multi-Dimensional Go Player Strength Assessment
+
+KataRank is a fork of the go-strength-model project, designed to build an objective, self-consistent multi-dimensional evaluation system for Go players.
+
+Key Features:
+
+- Extracts internal trunk representations from KataGo as high-dimensional features
+- Uses Set Transformer architecture for strength prediction
+- Multi-task learning outputs not only a unified KataRank score but also dimensional ability assessments (opening, middle game, endgame, style, etc.)
+- Aims to free from the noise and inconsistency of human-provided rank labels
+
+This project is under active development. Contributions and discussions are welcome.
+
+---
+
 This repository contains scripts, utilities and material for my strength model based on KataGo, which is the subject of my master thesis.
 
 The strength model is a neural network model which uses the existing KataGo network to interpret Go positions and moves. It uses the internal result representation of KataGo as input in its own architecture to predict players' strength rating from recent moves played. This document gives you step-by-step instructions for training and running the strength model.
