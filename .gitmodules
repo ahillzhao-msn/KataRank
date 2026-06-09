@@ -1,0 +1,3 @@
+[submodule "katago"]
+	path = katago
+	url = https://github.com/ahillzhao-msn/KataGo.git
