@@ -111,10 +111,10 @@ class KataGoEngine:
     """
 
     # Paths searched in order when katago_bin is not given explicitly.
-    # parents[2] = project root (src/katarank/engine.py → src/katarank → src → root)
+    # parents[0] = src/katarank/ — works both in dev (editable) and installed wheel.
     _DEFAULT_BINS = [
-        Path(__file__).parents[2] / 'bin' / 'katago.exe',   # <project>/bin/katago.exe
-        Path(__file__).parents[2] / 'bin' / 'katago',       # <project>/bin/katago
+        Path(__file__).parent / 'bin' / 'katago.exe',
+        Path(__file__).parent / 'bin' / 'katago',
     ]
 
     def __init__(

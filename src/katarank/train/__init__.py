@@ -1,0 +1,1 @@
+"""KataRank — training utilities"""

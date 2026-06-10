@@ -7,10 +7,10 @@ datasetviewer/
 games*.csv
 trickplay/
 
-# KataGo binary — download from ahillzhao-msn/KataGo/releases, place in bin/
-bin/katago.exe
-bin/katago
-bin/*.bin.gz
+# KataGo binary — download from ahillzhao-msn/KataGo/releases, place in src/katarank/bin/
+src/katarank/bin/katago.exe
+src/katarank/bin/katago
+src/katarank/bin/*.bin.gz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
