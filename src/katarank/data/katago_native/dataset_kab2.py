@@ -23,16 +23,56 @@ Targets returned per sample:
     human_lp_w    float   HumanSL log-prior confidence for White
 """
 
-import os
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, TypedDict
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 from katarank.data.preprocess import read_kab2, probe_kab2_dim
+
+
+# ─── Canonical sample type ────────────────────────────────────────────────────
+
+class KAB2Sample(TypedDict):
+    """One paired game sample — both players' moves concatenated."""
+    x:          torch.Tensor   # (N_b + N_w, input_dim) float32
+    seq_len:    int
+    target_b:   torch.Tensor   # meanLogPrior for Black
+    target_w:   torch.Tensor   # meanLogPrior for White
+    rank_b:     torch.Tensor   # humanRankIdx (0-28 or -1)
+    rank_w:     torch.Tensor
+    human_lp_b: torch.Tensor   # HumanSL confidence weight
+    human_lp_w: torch.Tensor
+    game_id:    str
+
+
+def kab2_make_sample(
+    moves_b: np.ndarray,
+    moves_w: np.ndarray,
+    game_id: str,
+    target_b: float = 0.0,
+    target_w: float = 0.0,
+    rank_b: int = -1,
+    rank_w: int = -1,
+    human_lp_b: float = 0.0,
+    human_lp_w: float = 0.0,
+) -> KAB2Sample:
+    """Build a KAB2Sample from numpy move arrays (Black first, then White)."""
+    x = np.concatenate([moves_b, moves_w], axis=0)
+    return KAB2Sample(
+        x          = torch.from_numpy(x),
+        seq_len    = len(x),
+        target_b   = torch.tensor(target_b,   dtype=torch.float32),
+        target_w   = torch.tensor(target_w,   dtype=torch.float32),
+        rank_b     = torch.tensor(rank_b,     dtype=torch.long),
+        rank_w     = torch.tensor(rank_w,     dtype=torch.long),
+        human_lp_b = torch.tensor(human_lp_b, dtype=torch.float32),
+        human_lp_w = torch.tensor(human_lp_w, dtype=torch.float32),
+        game_id    = game_id,
+    )
 
 
 # ─── Rank string → integer index ──────────────────────────────────────────────
