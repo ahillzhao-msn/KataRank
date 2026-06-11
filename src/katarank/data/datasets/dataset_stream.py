@@ -24,7 +24,7 @@ import numpy as np
 from torch.utils.data import IterableDataset
 
 from katarank.engine import KataGoEngine
-from katarank.data.katago_native.dataset_base import (
+from katarank.schema import (
     BaseKAB2Dataset,
     KAB2Sample,
     kab2_make_sample,

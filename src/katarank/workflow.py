@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from katarank.data.katago_native import KAB2Sample, kab2_make_sample, kab2_collate
+from katarank.schema import KAB2Sample, kab2_make_sample, kab2_collate
 
 
 # ─── Inference result type ────────────────────────────────────────────────────

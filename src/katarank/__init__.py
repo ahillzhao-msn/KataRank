@@ -25,7 +25,10 @@ Quick start:
 
 from katarank.engine import KataGoEngine, parse_kab2_buffer
 from katarank.workflow import TrainingWorkflow, InferenceWorkflow, RankResult
-from katarank.data.katago_native import KAB2Dataset, KAB2StreamDataset, KAB2Sample, KAB2Batch, BaseKAB2Dataset
+from katarank.schema import KAB2Sample, KAB2Batch, BaseKAB2Dataset, KAB2Output
+from katarank.schema import output_to_json, output_from_json, save_output, load_output
+from katarank.schema import save_outputs_batch, load_outputs_batch, rank_idx_to_str
+from katarank.data.datasets import KAB2Dataset, KAB2StreamDataset
 
 __all__ = [
     # Engine
@@ -33,7 +36,13 @@ __all__ = [
     # Workflows
     'TrainingWorkflow', 'InferenceWorkflow',
     # Data classes
-    'KAB2Dataset', 'KAB2StreamDataset', 'KAB2Sample',
+    'KAB2Dataset', 'KAB2StreamDataset', 'KAB2Sample', 'KAB2Batch',
+    # Schema
+    'BaseKAB2Dataset', 'KAB2Output',
+    'output_to_json', 'output_from_json',
+    'save_output', 'load_output',
+    'save_outputs_batch', 'load_outputs_batch',
+    'rank_idx_to_str',
     # Result type
     'RankResult',
 ]

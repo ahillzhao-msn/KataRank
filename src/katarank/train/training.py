@@ -14,7 +14,7 @@ import torch
 import torch.optim as optim
 
 from katarank.model import KataRankModel, KataRankLoss
-from katarank.data.katago_native import KAB2Dataset, make_kab2_loader
+from katarank.data.datasets import KAB2Dataset, make_kab2_loader
 
 
 def _device(cfg_val: str) -> torch.device:

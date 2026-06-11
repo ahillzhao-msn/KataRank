@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from katarank.data.katago_native.dataset_base import (
+from katarank.schema import (
     BaseKAB2Dataset,
     KAB2Sample,
     kab2_make_sample,

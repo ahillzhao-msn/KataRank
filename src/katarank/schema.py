@@ -1,13 +1,12 @@
 """
-KataRank — Base KAB2 Dataset (Abstract)
-========================================
-Defines the canonical contract for all KAB2 data sources.
+KataRank — KataRank — Data Schema
+=========================
+Defines the canonical data contract for the project.
 
-Two concrete subclasses:
-  - KAB2Dataset         (file-based: reads _B.npz/_W.npz from disk)
-  - KAB2StreamDataset   (stream-based: pipes from katago.exe via KataGoEngine)
-
-Every dataset yields KAB2Sample — one game with both players' moves concatenated.
+- BaseKAB2Dataset: abstract base for all data sources
+- KAB2Sample: per-game sample format
+- KAB2Batch: collated batch format
+- kab2_make_sample / kab2_collate: sample & batch construction
 """
 
 from abc import ABC, abstractmethod
@@ -146,3 +145,118 @@ def kab2_collate(batch: List[Union[KAB2Sample, Dict]]) -> KAB2Batch:
         human_lp_w = torch.stack([item['human_lp_w'] for item in batch]),
         game_ids   = [item['game_id'] for item in batch],
     )
+
+
+# ─── Model inference output ──────────────────────────────────────────────────
+
+class KAB2Output(TypedDict):
+    """Model inference output — one per game, symmetric with KAB2Sample.
+
+    Core output: per-player rating + rank + confidence.
+    Optional: full rank probability distributions (29-dim softmax).
+    """
+    game_id:    str
+    metadata:   Dict          # 棋局元数据（日期、规则、贴目、棋手名等）
+
+    b_rating:   float
+    w_rating:   float
+    b_rank:     int           # 0=20k … 28=9d
+    w_rank:     int
+    b_confidence: float       # 可靠性（棋谱质量、手数等）
+    w_confidence: float
+
+    b_rank_probs: Optional[List[float]]  # 29-dim softmax 输出
+    w_rank_probs: Optional[List[float]]
+
+
+RANK_NAMES = [
+    '20k','19k','18k','17k','16k','15k','14k','13k','12k','11k',
+    '10k','9k','8k','7k','6k','5k','4k','3k','2k','1k',
+    '1d','2d','3d','4d','5d','6d','7d','8d','9d',
+]
+
+
+def rank_idx_to_str(idx: int) -> str:
+    """Convert rank index 0..28 → '20k' … '9d'. Returns '?' for invalid."""
+    return RANK_NAMES[idx] if 0 <= idx < len(RANK_NAMES) else '?'
+
+
+# ─── Serialization ───────────────────────────────────────────────────────────
+
+def output_to_json(out: KAB2Output, indent: int = 2) -> str:
+    """Serialize a single KAB2Output to JSON string."""
+    import json
+    d = dict(out)
+    # Convert rank probs from Optional[List] — handled naturally by json
+    return json.dumps(d, indent=indent, ensure_ascii=False)
+
+
+def output_from_json(s: str) -> KAB2Output:
+    """Deserialize a KAB2Output from JSON string."""
+    import json
+    d = json.loads(s)
+    return KAB2Output(**d)
+
+
+def save_output(out: KAB2Output, path: str):
+    """Save KAB2Output to file. Auto-detect format by extension."""
+    if path.endswith('.json'):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(output_to_json(out))
+    elif path.endswith('.json.gz'):
+        import gzip
+        with gzip.open(path, 'wt', encoding='utf-8') as f:
+            f.write(output_to_json(out))
+    else:
+        raise ValueError(f"Unsupported extension: {path} (use .json or .json.gz)")
+
+
+def load_output(path: str) -> KAB2Output:
+    """Load KAB2Output from file. Auto-detect format by extension."""
+    if path.endswith('.json.gz'):
+        import gzip
+        with gzip.open(path, 'rt', encoding='utf-8') as f:
+            return output_from_json(f.read())
+    elif path.endswith('.json'):
+        with open(path, 'r', encoding='utf-8') as f:
+            return output_from_json(f.read())
+    else:
+        raise ValueError(f"Unsupported extension: {path} (use .json or .json.gz)")
+
+
+def save_outputs_batch(outputs: List[KAB2Output], path: str):
+    """Save multiple KAB2Outputs as JSONL (.jsonl or .jsonl.gz)."""
+    import json as _json
+    if path.endswith('.jsonl.gz'):
+        import gzip
+        with gzip.open(path, 'wt', encoding='utf-8') as f:
+            for o in outputs:
+                f.write(_json.dumps(dict(o), ensure_ascii=False) + '\n')
+    elif path.endswith('.jsonl'):
+        with open(path, 'w', encoding='utf-8') as f:
+            for o in outputs:
+                f.write(_json.dumps(dict(o), ensure_ascii=False) + '\n')
+    else:
+        raise ValueError(f"Unsupported extension: {path} (use .jsonl or .jsonl.gz)")
+
+
+def load_outputs_batch(path: str) -> List[KAB2Output]:
+    """Load multiple KAB2Outputs from JSONL (.jsonl or .jsonl.gz)."""
+    import json as _json
+    outputs = []
+    if path.endswith('.jsonl.gz'):
+        import gzip
+        with gzip.open(path, 'rt', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    outputs.append(KAB2Output(**_json.loads(line)))
+    elif path.endswith('.jsonl'):
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    outputs.append(KAB2Output(**_json.loads(line)))
+    else:
+        raise ValueError(f"Unsupported extension: {path} (use .jsonl or .jsonl.gz)")
+    return outputs
