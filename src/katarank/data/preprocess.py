@@ -115,3 +115,29 @@ def _parse_kab2(raw: bytes) -> Tuple[np.ndarray, Dict]:
         'human_log_prior': float(summary[KAB2_SUM_HUMAN_LP]),
     }
     return moves, info
+
+
+# ─── Combined KAB2 pair reader ───────────────────────────────────────────────
+
+def read_kab2_combined(path: str) -> Tuple[np.ndarray, np.ndarray, Dict, Dict]:
+    """
+    Read a .kab2pair file containing both Black and White KAB2 payloads.
+
+    Format: [4B B_payload_size][B_KAB2_payload][4B W_payload_size][W_KAB2_payload]
+    Returns (b_moves, w_moves, b_info, w_info).
+    """
+    with open(path, 'rb') as f:
+        data = f.read()
+
+    b_sz = struct.unpack_from('<I', data, 0)[0]
+    w_sz = struct.unpack_from('<I', data, 4 + b_sz)[0]
+
+    b_moves = w_moves = None
+    b_info  = w_info  = None
+
+    if b_sz > 0:
+        b_moves, b_info = _parse_kab2(data[4: 4 + b_sz])
+    if w_sz > 0:
+        w_moves, w_info = _parse_kab2(data[8 + b_sz: 8 + b_sz + w_sz])
+
+    return b_moves, w_moves, b_info or {}, w_info or {}

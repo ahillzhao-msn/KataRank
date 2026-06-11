@@ -13,28 +13,27 @@ Quick start:
     rank_model = KataRankModel.load('katarank.pt')
 
     # Stream mode — no disk I/O
-    for x_b, x_w, info_b, info_w in engine.stream_to_tensors(['game.sgf']):
+    for x_b, x_w, info_b, info_w in engine.stream_to_tensors(sgf_paths=['game.sgf']):
         x = torch.cat([x_b, x_w], dim=0)
         out = rank_model(x, xlens=[len(x_b) + len(x_w)])
         print('b_rating:', out['b_rating'].item())
 
     # Lite mode — scalars only (10 dims, 100× faster)
-    for side, moves, info in engine.stream_games(['game.sgf'], mode='lite'):
+    for side, moves, info in engine.stream_games(sgf_paths=['game.sgf'], mode='lite'):
         print(side, moves.shape, info['mean_log_prior'])
-
-    # Queue mode — producer/consumer for training loops (no blocking on I/O)
-    sq = engine.stream_queue(sgfs, mode='full', buffer_size=64)
-    for moves_b, moves_w, info_b, info_w in sq:
-        x = torch.cat([torch.from_numpy(moves_b), torch.from_numpy(moves_w)])
-        out = rank_model(x, xlens=[len(moves_b) + len(moves_w)])
 """
 
-from katarank.engine import KataGoEngine, StreamQueue, parse_kab2_buffer
-from katarank.pool import KataGoPool
-from katarank.workflow import TrainingWorkflow, InferenceWorkflow, MixedWorkflow
+from katarank.engine import KataGoEngine, parse_kab2_buffer
+from katarank.workflow import TrainingWorkflow, InferenceWorkflow, RankResult
+from katarank.data.katago_native import KAB2Dataset, KAB2StreamDataset, KAB2Sample, KAB2Batch, BaseKAB2Dataset
 
 __all__ = [
-    'KataGoEngine', 'StreamQueue', 'parse_kab2_buffer',
-    'KataGoPool',
-    'TrainingWorkflow', 'InferenceWorkflow', 'MixedWorkflow',
+    # Engine
+    'KataGoEngine', 'parse_kab2_buffer',
+    # Workflows
+    'TrainingWorkflow', 'InferenceWorkflow',
+    # Data classes
+    'KAB2Dataset', 'KAB2StreamDataset', 'KAB2Sample',
+    # Result type
+    'RankResult',
 ]

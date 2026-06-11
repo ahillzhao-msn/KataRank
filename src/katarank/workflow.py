@@ -1,47 +1,56 @@
 """
 KataRank — Workflows
 
-Three high-level patterns:
+Two high-level patterns:
 
-TrainingWorkflow   — online training from a KataGoPool (stream) or KAB2FileDataset (files)
+TrainingWorkflow   — online training from any stream of (moves_b, moves_w, info_b, info_w)
 InferenceWorkflow  — rank inference for a batch of SGF files or strings
-MixedWorkflow      — concurrent training + inference using separate pool pipelines
 
 Usage::
 
-    # Online training from live KataGo stream
+    # Online training from a live stream
+    engine = KataGoEngine(model='kata1-b18c384nbt.bin.gz')
+    stream = engine.stream_to_tensors(sgfs, mode='full')
     wf = TrainingWorkflow(model, loss_fn, optimizer)
-    wf.run_stream(pool, pipeline='train', epochs=1)
+    wf.run_stream(stream, batch_size=16, max_steps=1000)
 
     # Batch inference
     inf = InferenceWorkflow(model, engine)
     results = inf.rank_files(['game1.sgf', 'game2.sgf'])
-
-    # Mixed: train on one pipeline, evaluate on another
-    mix = MixedWorkflow(model, loss_fn, optimizer, pool)
-    mix.run(train_pipe='train', eval_pipe='eval', train_steps=1000)
 """
 
 import time
-from typing import Callable, Dict, Iterable, List, Optional, Union
+from typing import Callable, Dict, Iterator, List, Optional, TypedDict, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from katarank.data.base import KAB2Base
-from katarank.engine import KataGoEngine, StreamQueue
-from katarank.pool import KataGoPool
+from katarank.data.katago_native import KAB2Sample, kab2_make_sample, kab2_collate
+
+
+# ─── Inference result type ────────────────────────────────────────────────────
+
+class RankResult(TypedDict):
+    """Per-game inference output from InferenceWorkflow."""
+    game_id:      str
+    b_log_prior:  float            # raw rating signal for Black
+    w_log_prior:  float            # raw rating signal for White
+    b_rank_probs: Optional[torch.Tensor]  # (29,) softmax over rank classes
+    w_rank_probs: Optional[torch.Tensor]
+    b_rank_top:   int              # argmax rank index (0=20k … 28=9d), -1 if unavailable
+    w_rank_top:   int
 
 
 # ─── Training Workflow ────────────────────────────────────────────────────────
 
 class TrainingWorkflow:
     """
-    Trains a KataRankModel from either a live stream or file-based dataset.
+    Trains a KataRankModel from any iterator of (moves_b, moves_w, info_b, info_w).
 
-    The workflow owns the training loop; callers supply model, loss, optimizer.
+    The workflow owns the training loop; callers supply model, loss, optimizer,
+    and an iterator (e.g. from KataGoEngine.stream_to_tensors() or a DataLoader).
     """
 
     def __init__(
@@ -67,26 +76,31 @@ class TrainingWorkflow:
         self._step     = 0
         self._total_loss = 0.0
 
-    # ── Stream source ─────────────────────────────────────────────────────────
-
     def run_stream(
         self,
-        pool: KataGoPool,
-        pipeline: str,
+        stream: Iterator,
         batch_size: int = 16,
         max_steps: int = 0,
     ) -> Dict:
         """
-        Train from a named pool pipeline (StreamQueue).
+        Train from any iterator yielding (moves_b, moves_w, info_b, info_w).
 
         Accumulates samples into micro-batches of `batch_size` before
         each gradient step.
+
+        Args:
+            stream:    Iterator over (moves_b, moves_w, info_b, info_w) tuples.
+                       Can be:
+                         - KataGoEngine.stream_to_tensors()  (torch tensors)
+                         - KAB2StreamDataset                  (KAB2Sample)
+                         - Any custom iterable with the same tuple shape
+            batch_size: Number of games per gradient step
+            max_steps:  Max gradient steps (0 = unlimited)
         """
-        queue  = pool.queue(pipeline)
         buffer = []
         t0     = time.time()
 
-        for item in queue:
+        for item in stream:
             buffer.append(item)
             if len(buffer) < batch_size:
                 continue
@@ -118,14 +132,12 @@ class TrainingWorkflow:
 
         return {'steps': self._step, 'elapsed': time.time() - t0}
 
-    # ── File source ───────────────────────────────────────────────────────────
-
     def run_loader(
         self,
         loader,
         epochs: int = 1,
     ) -> Dict:
-        """Train from a DataLoader (KAB2FileDataset or any map-style dataset)."""
+        """Train from a DataLoader (KAB2Dataset or any map-style dataset)."""
         t0 = time.time()
         for epoch in range(1, epochs + 1):
             for batch in loader:
@@ -163,11 +175,21 @@ class TrainingWorkflow:
 
     @staticmethod
     def _collate_raw(items) -> Dict:
-        """Collate (moves_b, moves_w, info_b, info_w) tuples into a batch dict."""
-        from katarank.data.base import KAB2Base
+        """
+        Collate items into a batch dict.
+
+        Items can be:
+          - (moves_b, moves_w, info_b, info_w) tuples (from stream_to_tensors)
+          - KAB2Sample dicts (from KAB2StreamDataset)
+        """
+        # Detect by shape: if first element is a dict, treat as KAB2Sample
+        if items and isinstance(items[0], dict) and 'game_id' in items[0]:
+            return kab2_collate(items)
+
+        # Otherwise treat as stream_to_tensors output
         samples = []
         for moves_b, moves_w, info_b, info_w in items:
-            samples.append(KAB2Base._make_sample(
+            samples.append(kab2_make_sample(
                 moves_b    = moves_b,
                 moves_w    = moves_w,
                 game_id    = info_b.get('game_id', ''),
@@ -178,7 +200,7 @@ class TrainingWorkflow:
                 human_lp_b = info_b.get('human_log_prior', 0.0),
                 human_lp_w = info_w.get('human_log_prior', 0.0),
             ))
-        return KAB2Base.collate(samples)
+        return kab2_collate(samples)
 
 
 # ─── Inference Workflow ───────────────────────────────────────────────────────
@@ -193,7 +215,7 @@ class InferenceWorkflow:
     def __init__(
         self,
         model: nn.Module,
-        engine: KataGoEngine,
+        engine: 'KataGoEngine',
         device: Optional[str] = None,
     ):
         self.model  = model
@@ -209,30 +231,14 @@ class InferenceWorkflow:
         sgfs: Union[List[str], str],
         mode: str = 'lite',
         min_moves: int = 10,
-    ) -> List[Dict]:
-        """
-        Rank players in a list of SGF file paths.
-
-        Returns list of dicts per game::
-
-            {
-              'game_id': str,
-              'b_log_prior': float,
-              'w_log_prior': float,
-              'b_rank_probs': Tensor (29,),
-              'w_rank_probs': Tensor (29,),
-              'b_rank_top': int,  # argmax
-              'w_rank_top': int,
-            }
-        """
+    ) -> List[RankResult]:
+        """Rank players in a list of SGF file paths."""
         results = []
-        sq = self.engine.stream_queue(sgfs, mode=mode, min_moves=min_moves)
-        try:
-            for moves_b, moves_w, info_b, info_w in sq:
-                result = self._infer_one(moves_b, moves_w, info_b, info_w)
-                results.append(result)
-        finally:
-            sq.close()
+        for x_b, x_w, info_b, info_w in self.engine.stream_to_tensors(
+            sgf_paths=sgfs, mode=mode, min_moves=min_moves
+        ):
+            result = self._infer_one(x_b, x_w, info_b, info_w)
+            results.append(result)
         return results
 
     def rank_strings(
@@ -240,107 +246,34 @@ class InferenceWorkflow:
         sgf_strings: List[str],
         mode: str = 'lite',
         min_moves: int = 10,
-    ) -> List[Dict]:
-        """
-        Rank players from in-memory SGF strings.
-
-        Writes temp SGF files transparently; no caller-side I/O needed.
-        """
-        import tempfile, os
-        with tempfile.TemporaryDirectory() as tmp:
-            paths = []
-            for i, sgf_str in enumerate(sgf_strings):
-                p = os.path.join(tmp, f'game_{i:06d}.sgf')
-                with open(p, 'w', encoding='utf-8') as f:
-                    f.write(sgf_str)
-                paths.append(p)
-            return self.rank_files(paths, mode=mode, min_moves=min_moves)
+    ) -> List[RankResult]:
+        """Rank players from in-memory SGF strings."""
+        results = []
+        for x_b, x_w, info_b, info_w in self.engine.stream_to_tensors(
+            sgf_strings=sgf_strings, mode=mode, min_moves=min_moves
+        ):
+            result = self._infer_one(x_b, x_w, info_b, info_w)
+            results.append(result)
+        return results
 
     @torch.no_grad()
-    def _infer_one(self, moves_b, moves_w, info_b, info_w) -> Dict:
-        sample = KAB2Base._make_sample(
-            moves_b = moves_b, moves_w = moves_w,
+    def _infer_one(self, x_b, x_w, info_b, info_w) -> RankResult:
+        sample = kab2_make_sample(
+            moves_b = x_b,
+            moves_w = x_w,
             game_id = info_b.get('game_id', ''),
         )
-        x     = sample['x'].unsqueeze(0).to(self.device)  # treat as batch-1... actually pass flat
-        # KataRankModel expects flat (N_total, input_dim) + xlens
-        x_flat = sample['x'].to(self.device)
-        out   = self.model(x_flat, xlens=[sample['seq_len']])
+        out = self.model(sample['x'].to(self.device), xlens=[sample['seq_len']])
 
         def _rank_probs(logits):
             return torch.softmax(logits, dim=-1).squeeze(0).cpu()
 
-        return {
-            'game_id':      sample['game_id'],
-            'b_log_prior':  out.get('b_log_prior',  out.get('b_rating',  torch.tensor(0.))).item(),
-            'w_log_prior':  out.get('w_log_prior',  out.get('w_rating',  torch.tensor(0.))).item(),
-            'b_rank_probs': _rank_probs(out['b_rank_logits']) if 'b_rank_logits' in out else None,
-            'w_rank_probs': _rank_probs(out['w_rank_logits']) if 'w_rank_logits' in out else None,
-            'b_rank_top':   int(out['b_rank_logits'].argmax(-1)) if 'b_rank_logits' in out else -1,
-            'w_rank_top':   int(out['w_rank_logits'].argmax(-1)) if 'w_rank_logits' in out else -1,
-        }
-
-
-# ─── Mixed Workflow ───────────────────────────────────────────────────────────
-
-class MixedWorkflow:
-    """
-    Runs training and evaluation concurrently from a shared pool.
-
-    Training reads from `train_pipe`; evaluation reads from `eval_pipe`
-    in a separate thread, periodically logging rank accuracy metrics.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        loss_fn: Callable,
-        optimizer: optim.Optimizer,
-        pool: KataGoPool,
-        device: Optional[str] = None,
-    ):
-        self.pool    = pool
-        self.trainer = TrainingWorkflow(model, loss_fn, optimizer, device=device)
-        self.engine  = None  # not needed; pool manages engines
-
-    def run(
-        self,
-        train_pipe: str,
-        eval_pipe: Optional[str]   = None,
-        train_batch_size: int      = 16,
-        max_train_steps: int       = 0,
-        eval_every: int            = 200,
-    ) -> Dict:
-        """
-        Run training loop on `train_pipe`.
-        If `eval_pipe` is set, evaluate every `eval_every` steps.
-        """
-        import threading
-
-        eval_results = []
-
-        def _eval_loop():
-            if eval_pipe is None:
-                return
-            q = self.pool.queue(eval_pipe)
-            count, correct = 0, 0
-            for moves_b, moves_w, info_b, info_w in q:
-                count += 1
-            eval_results.append({'games_evaluated': count})
-
-        eval_thread = threading.Thread(target=_eval_loop, daemon=True)
-        eval_thread.start()
-
-        train_result = self.trainer.run_stream(
-            self.pool,
-            pipeline   = train_pipe,
-            batch_size = train_batch_size,
-            max_steps  = max_train_steps,
+        return RankResult(
+            game_id      = sample['game_id'],
+            b_log_prior  = out.get('b_log_prior', out.get('b_rating', torch.tensor(0.))).item(),
+            w_log_prior  = out.get('w_log_prior', out.get('w_rating', torch.tensor(0.))).item(),
+            b_rank_probs = _rank_probs(out['b_rank_logits']) if 'b_rank_logits' in out else None,
+            w_rank_probs = _rank_probs(out['w_rank_logits']) if 'w_rank_logits' in out else None,
+            b_rank_top   = int(out['b_rank_logits'].argmax(-1)) if 'b_rank_logits' in out else -1,
+            w_rank_top   = int(out['w_rank_logits'].argmax(-1)) if 'w_rank_logits' in out else -1,
         )
-
-        eval_thread.join(timeout=30.0)
-
-        return {
-            'train': train_result,
-            'eval':  eval_results,
-        }
