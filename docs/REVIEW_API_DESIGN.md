@@ -120,7 +120,18 @@ B 流第 i 行 → 全局第 2i+1 手；W 流第 j 行 → 全局第 2j+2 手（
 预留（本次不实现，字段名已定）：每个 move 对象将来追加
 `"features": [{"id": 412, "activation": 3.1, "label": "overplay"}]`（SAE）。
 
-### 3.3 与 /rank 的关系
+### 3.3 Schema 契约：OpenAPI，而非引库
+
+消费方（gopredict 等）**不引用 katarank Python 库**（会拖入 torch 依赖树），
+也不提供自建 `/schema` 端点。所有端点声明 Pydantic `response_model`
+（`KAB2OutputModel` / `MoveRecordModel` / `ReviewOutputModel`，与 schema.py
+的 TypedDict 镜像），**`GET /openapi.json` 即权威契约**——机器可读、随服务
+版本走。消费方可在 CI 里拉取比对关键字段做契约测试。
+
+错误语义随之收紧：空结果不再返回 `{'error': ...}` 200，改为 HTTP 422
+（too few moves）/ 404（文件或目录缺失），响应体恒符合声明 schema。
+
+### 3.4 与 /rank 的关系
 
 `/rank/*` 不变（gopredict 聚合只要整局结论时用，响应小）。
 `/review/*` 同一次流式分析多回传 `moves` 数组——一局 250 手 ≈ 250 × 8 字段

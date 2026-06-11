@@ -74,6 +74,40 @@ if _FASTAPI_AVAILABLE:
         mode: str = 'lite'
         min_moves: int = 10
 
+    # ── Response schemas ──────────────────────────────────────────────────
+    # Pydantic mirrors of schema.py's TypedDicts (KAB2Output / MoveRecord /
+    # ReviewOutput). Their purpose is the OpenAPI contract: consumers like
+    # gopredict read /openapi.json instead of importing this library.
+
+    class KAB2OutputModel(BaseModel):
+        """Whole-game verdict — one per game (schema.KAB2Output)."""
+        game_id:      str
+        metadata:     dict
+        b_rating:     float
+        w_rating:     float
+        b_rank:       int                      # 0=20k … 28=9d, -1 unknown
+        w_rank:       int
+        b_confidence: float
+        w_confidence: float
+        b_rank_probs: Optional[List[float]] = None   # 29-dim distribution
+        w_rank_probs: Optional[List[float]] = None
+
+    class MoveRecordModel(BaseModel):
+        """Per-move review record, mover's perspective (schema.MoveRecord)."""
+        move_no:      int                      # 1-based global move number
+        color:        str                      # 'B' | 'W'
+        winrate:      float
+        score_lead:   float
+        score_stdev:  float
+        policy_prior: float
+        policy_rank:  int                      # 0 = engine's top choice
+        win_delta:    float
+        score_delta:  float
+
+    class ReviewOutputModel(KAB2OutputModel):
+        """Verdict + per-move records (schema.ReviewOutput)."""
+        moves: List[MoveRecordModel]
+
 
 # ─── App factory ─────────────────────────────────────────────────────────────
 
@@ -214,7 +248,7 @@ def create_app(
 
     # Endpoints below are plain `def`: FastAPI runs them in a worker thread,
     # keeping the event loop free while katago runs as a blocking subprocess.
-    @app.post('/rank/string')
+    @app.post('/rank/string', response_model=KAB2OutputModel)
     def rank_string(req: RankStringRequest):
         """Rank players from an SGF content string. Returns KAB2Output JSON."""
         try:
@@ -225,10 +259,11 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
-            return {'error': 'no output (too few moves?)'}
+            raise HTTPException(status_code=422,
+                                detail='no output (too few moves?)')
         return dict(results[0])
 
-    @app.post('/rank/file')
+    @app.post('/rank/file', response_model=KAB2OutputModel)
     def rank_file(req: RankFileRequest):
         """Rank players from an SGF file path. Returns KAB2Output JSON."""
         _check_path(req.path)
@@ -242,10 +277,11 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
-            return {'error': 'no output'}
+            raise HTTPException(status_code=422,
+                                detail='no output (too few moves?)')
         return dict(results[0])
 
-    @app.post('/rank/batch')
+    @app.post('/rank/batch', response_model=List[KAB2OutputModel])
     def rank_batch(req: RankBatchRequest):
         """Rank multiple SGFs. Items are file paths or SGF strings."""
         try:
@@ -273,7 +309,7 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(e))
         return [dict(r) for r in results]
 
-    @app.post('/review/string')
+    @app.post('/review/string', response_model=ReviewOutputModel)
     def review_string(req: RankStringRequest):
         """Rank + per-move review records from an SGF content string."""
         try:
@@ -284,10 +320,11 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
-            return {'error': 'no output (too few moves?)'}
+            raise HTTPException(status_code=422,
+                                detail='no output (too few moves?)')
         return dict(results[0])
 
-    @app.post('/review/file')
+    @app.post('/review/file', response_model=ReviewOutputModel)
     def review_file(req: RankFileRequest):
         """Rank + per-move review records from an SGF file path."""
         _check_path(req.path)
@@ -301,10 +338,11 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
-            return {'error': 'no output'}
+            raise HTTPException(status_code=422,
+                                detail='no output (too few moves?)')
         return dict(results[0])
 
-    @app.post('/review/batch')
+    @app.post('/review/batch', response_model=List[ReviewOutputModel])
     def review_batch(req: RankBatchRequest):
         """Rank + per-move review records for multiple SGFs."""
         try:
@@ -332,7 +370,7 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(e))
         return [dict(r) for r in results]
 
-    @app.post('/rank/directory')
+    @app.post('/rank/directory', response_model=List[KAB2OutputModel])
     def rank_directory(req: RankDirectoryRequest):
         """Rank all .sgf files in a directory."""
         _check_path(req.directory)
@@ -341,7 +379,8 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Directory not found: {req.directory}")
         sgfs = sorted(str(p) for p in d.glob('*.sgf'))
         if not sgfs:
-            return {'error': f'No .sgf files found in {req.directory}'}
+            raise HTTPException(status_code=404,
+                                detail=f'No .sgf files found in {req.directory}')
         try:
             with engine_sem:
                 results = _run_rank_files(
