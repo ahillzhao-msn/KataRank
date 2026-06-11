@@ -78,6 +78,10 @@ def create_app(
     katago_config: Optional[str] = None,
     human_model: Optional[str] = None,
     device: Optional[str] = None,
+    max_concurrency: int = 1,
+    sgf_root: Optional[str] = None,
+    persistent: bool = True,
+    engine_mode: str = 'lite',
 ) -> 'FastAPI':
     """
     Create and configure the FastAPI application.
@@ -87,14 +91,20 @@ def create_app(
         checkpoint_path: Optional KataRankModel checkpoint (.pt)
         katago_bin:      KataGo binary; auto-detected if None
         device:          'cpu', 'cuda', or None for auto
+        max_concurrency: Max simultaneous katago analyses (default 1 = serialize)
+        sgf_root:        If set, /rank/file and /rank/directory only accept
+                         paths under this directory (path whitelist)
+        persistent:      Keep one katago daemon loaded for the server's
+                         lifetime (sub-second request latency). False spawns
+                         a fresh process per request (model reload each time).
+        engine_mode:     Daemon analysis mode, 'lite' or 'full'. Requests
+                         asking for the other mode fall back to one-shot.
     """
     _require_fastapi()
+    import threading
 
-    from katarank.engine import KataGoEngine
+    from katarank.engine import KataGoEngine, PersistentKataGoEngine
     from katarank.workflow import InferenceWorkflow
-    from katarank.schema import (
-        KAB2Output, output_to_json, rank_idx_to_str,
-    )
 
     app = FastAPI(
         title='KataRank API',
@@ -104,12 +114,23 @@ def create_app(
 
     # ── Shared state ──────────────────────────────────────────────────────────
 
-    engine = KataGoEngine(
-        model       = katago_model,
-        config      = katago_config,
-        human_model = human_model,
-        katago_bin  = katago_bin,
-    )
+    if persistent:
+        engine = PersistentKataGoEngine(
+            model       = katago_model,
+            config      = katago_config,
+            human_model = human_model,
+            katago_bin  = katago_bin,
+            mode        = engine_mode,
+        )
+        engine.start()   # pay the model load once, at server boot
+        app.add_event_handler('shutdown', engine.close)
+    else:
+        engine = KataGoEngine(
+            model       = katago_model,
+            config      = katago_config,
+            human_model = human_model,
+            katago_bin  = katago_bin,
+        )
 
     # Load rank model if checkpoint given
     inf_workflow: Optional[InferenceWorkflow] = None
@@ -118,32 +139,76 @@ def create_app(
         rank_model = KataRankModel.load(checkpoint_path)
         inf_workflow = InferenceWorkflow(rank_model, engine, device=device)
 
-    def _require_model():
-        if inf_workflow is None:
+    # Serialize katago runs: each analysis spawns a GPU-bound subprocess,
+    # so unbounded concurrency would thrash the device.
+    engine_sem = threading.Semaphore(max_concurrency)
+
+    root = Path(sgf_root).resolve() if sgf_root else None
+
+    def _check_path(p: str):
+        """Reject paths outside sgf_root when a whitelist is configured."""
+        if root is None:
+            return
+        try:
+            ok = Path(p).resolve().is_relative_to(root)
+        except (OSError, ValueError):
+            ok = False
+        if not ok:
             raise HTTPException(
-                status_code=503,
-                detail="No KataRankModel checkpoint loaded. "
-                       "Start server with --checkpoint path/to/best.pt"
+                status_code=403,
+                detail=f"Path outside allowed root {root}: {p}"
             )
-        return inf_workflow
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
     @app.get('/health')
     async def health():
+        alive = True
+        if persistent:
+            alive = engine._proc is not None and engine._proc.poll() is None
         return {
-            'status': 'ok',
+            'status': 'ok' if alive else 'engine_down',
             'model_loaded': inf_workflow is not None,
-            'engine_ready': True,
+            'engine_persistent': persistent,
+            'engine_ready': alive,
         }
 
+    @app.post('/engine/reset')
+    def engine_reset():
+        """Soft reset: clear the daemon's NN caches (models stay loaded)."""
+        if not persistent:
+            raise HTTPException(status_code=400,
+                                detail="No persistent engine (started with persistent=False)")
+        try:
+            with engine_sem:
+                engine.soft_reset()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {'status': 'reset'}
+
+    @app.post('/engine/restart')
+    def engine_restart():
+        """Hard restart: kill the daemon and reload models."""
+        if not persistent:
+            raise HTTPException(status_code=400,
+                                detail="No persistent engine (started with persistent=False)")
+        try:
+            with engine_sem:
+                engine.restart()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {'status': 'restarted'}
+
+    # Endpoints below are plain `def`: FastAPI runs them in a worker thread,
+    # keeping the event loop free while katago runs as a blocking subprocess.
     @app.post('/rank/string')
-    async def rank_string(req: RankStringRequest):
+    def rank_string(req: RankStringRequest):
         """Rank players from an SGF content string. Returns KAB2Output JSON."""
         try:
-            results = _run_rank_strings(
-                engine, inf_workflow, [req.sgf], req.mode, req.min_moves
-            )
+            with engine_sem:
+                results = _run_rank_strings(
+                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves
+                )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
@@ -151,14 +216,16 @@ def create_app(
         return dict(results[0])
 
     @app.post('/rank/file')
-    async def rank_file(req: RankFileRequest):
+    def rank_file(req: RankFileRequest):
         """Rank players from an SGF file path. Returns KAB2Output JSON."""
+        _check_path(req.path)
         if not Path(req.path).exists():
             raise HTTPException(status_code=404, detail=f"File not found: {req.path}")
         try:
-            results = _run_rank_files(
-                engine, inf_workflow, [req.path], req.mode, req.min_moves
-            )
+            with engine_sem:
+                results = _run_rank_files(
+                    engine, inf_workflow, [req.path], req.mode, req.min_moves
+                )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         if not results:
@@ -166,23 +233,27 @@ def create_app(
         return dict(results[0])
 
     @app.post('/rank/batch')
-    async def rank_batch(req: RankBatchRequest):
+    def rank_batch(req: RankBatchRequest):
         """Rank multiple SGFs. Items are file paths or SGF strings."""
         try:
             if req.item_type == 'string':
-                results = _run_rank_strings(
-                    engine, inf_workflow, req.items, req.mode, req.min_moves
-                )
+                with engine_sem:
+                    results = _run_rank_strings(
+                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                    )
             else:
+                for p in req.items:
+                    _check_path(p)
                 missing = [p for p in req.items if not Path(p).exists()]
                 if missing:
                     raise HTTPException(
                         status_code=404,
                         detail=f"Files not found: {missing[:5]}"
                     )
-                results = _run_rank_files(
-                    engine, inf_workflow, req.items, req.mode, req.min_moves
-                )
+                with engine_sem:
+                    results = _run_rank_files(
+                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                    )
         except HTTPException:
             raise
         except Exception as e:
@@ -190,8 +261,9 @@ def create_app(
         return [dict(r) for r in results]
 
     @app.post('/rank/directory')
-    async def rank_directory(req: RankDirectoryRequest):
+    def rank_directory(req: RankDirectoryRequest):
         """Rank all .sgf files in a directory."""
+        _check_path(req.directory)
         d = Path(req.directory)
         if not d.is_dir():
             raise HTTPException(status_code=404, detail=f"Directory not found: {req.directory}")
@@ -199,9 +271,10 @@ def create_app(
         if not sgfs:
             return {'error': f'No .sgf files found in {req.directory}'}
         try:
-            results = _run_rank_files(
-                engine, inf_workflow, sgfs, req.mode, req.min_moves
-            )
+            with engine_sem:
+                results = _run_rank_files(
+                    engine, inf_workflow, sgfs, req.mode, req.min_moves
+                )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         return [dict(r) for r in results]
@@ -209,59 +282,12 @@ def create_app(
     return app
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# ─── Helpers (shared with the CLI — see katarank/workflow.py) ────────────────
 
-def _run_rank_files(
-    engine, inf_workflow, paths: List[str], mode: str, min_moves: int
-) -> List[KAB2Output]:
-    """Rank from SGF file paths using lite mode (stream)."""
-    results = []
-    for side, moves, info in engine.stream_games(
-        sgf_paths=paths, mode=mode, min_moves=min_moves
-    ):
-        _accumulate_result(results, side, moves, info)
-    return results
-
-
-def _run_rank_strings(
-    engine, inf_workflow, strings: List[str], mode: str, min_moves: int
-) -> List[KAB2Output]:
-    """Rank from SGF content strings using lite mode (stream)."""
-    results = []
-    for side, moves, info in engine.stream_games(
-        sgf_strings=strings, mode=mode, min_moves=min_moves
-    ):
-        _accumulate_result(results, side, moves, info)
-    return results
-
-
-def _accumulate_result(results, side, moves, info):
-    """Accumulate B/W pairs into KAB2Output."""
-    from katarank.schema import KAB2Output, rank_idx_to_str
-
-    # Find or create entry for this game (identified by game_id or sequential)
-    if not results or results[-1].get('w_rating') is not None:
-        # Need a new game — but we don't have game_id from lite stream info
-        # Use sequential index
-        idx = len(results)
-        results.append(KAB2Output(
-            game_id=info.get('source', f'game_{idx:04d}'),
-            metadata={},
-            b_rating=0.0, w_rating=0.0,
-            b_rank=-1, w_rank=-1,
-            b_confidence=0.0, w_confidence=0.0,
-            b_rank_probs=None, w_rank_probs=None,
-        ))
-
-    entry = results[-1]
-    if side == 'B':
-        entry['b_rating'] = float(info['mean_log_prior'])
-        entry['b_rank'] = info['human_rank_idx']
-        entry['b_confidence'] = 1.0 - abs(info['mean_log_prior']) / 10.0
-    elif side == 'W':
-        entry['w_rating'] = float(info['mean_log_prior'])
-        entry['w_rank'] = info['human_rank_idx']
-        entry['w_confidence'] = 1.0 - abs(info['mean_log_prior']) / 10.0
+from katarank.workflow import (
+    run_rank_files as _run_rank_files,
+    run_rank_strings as _run_rank_strings,
+)
 
 
 # ─── CLI entry point ─────────────────────────────────────────────────────────
@@ -277,6 +303,14 @@ def main():
     parser.add_argument('--device',      default=None,   help='cpu / cuda')
     parser.add_argument('--host',        default='127.0.0.1')
     parser.add_argument('--port',        type=int, default=8765)
+    parser.add_argument('--max-concurrency', type=int, default=1,
+                        help='Max simultaneous katago analyses (default 1)')
+    parser.add_argument('--sgf-root',    default=None,
+                        help='Restrict /rank/file and /rank/directory to this directory')
+    parser.add_argument('--no-persistent', action='store_true',
+                        help='Spawn a fresh katago per request instead of a resident daemon')
+    parser.add_argument('--engine-mode', default='lite', choices=['lite', 'full'],
+                        help="Resident daemon's analysis mode (default lite)")
     args = parser.parse_args()
 
     app = create_app(
@@ -286,6 +320,10 @@ def main():
         katago_config   = args.config,
         human_model     = args.human_model,
         device          = args.device,
+        max_concurrency = args.max_concurrency,
+        sgf_root        = args.sgf_root,
+        persistent      = not args.no_persistent,
+        engine_mode     = args.engine_mode,
     )
     uvicorn.run(app, host=args.host, port=args.port)
 

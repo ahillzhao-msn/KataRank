@@ -20,14 +20,14 @@ Usage::
 """
 
 import time
-from typing import Callable, Dict, Iterator, List, Optional, TypedDict, Union
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, TypedDict, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from katarank.schema import KAB2Sample, kab2_make_sample, kab2_collate
+from katarank.schema import KAB2Output, KAB2Sample, kab2_make_sample, kab2_collate
 
 
 # ─── Inference result type ────────────────────────────────────────────────────
@@ -35,9 +35,9 @@ from katarank.schema import KAB2Sample, kab2_make_sample, kab2_collate
 class RankResult(TypedDict):
     """Per-game inference output from InferenceWorkflow."""
     game_id:      str
-    b_log_prior:  float            # raw rating signal for Black
-    w_log_prior:  float            # raw rating signal for White
-    b_rank_probs: Optional[torch.Tensor]  # (29,) softmax over rank classes
+    b_rating:     float            # continuous strength signal for Black
+    w_rating:     float            # continuous strength signal for White
+    b_rank_probs: Optional[torch.Tensor]  # (29,) probabilities over rank classes
     w_rank_probs: Optional[torch.Tensor]
     b_rank_top:   int              # argmax rank index (0=20k … 28=9d), -1 if unavailable
     w_rank_top:   int
@@ -107,7 +107,7 @@ class TrainingWorkflow:
 
             batch = self._collate_raw(buffer)
             buffer.clear()
-            if not batch:
+            if not batch['xlens']:
                 continue
 
             loss = self._step_batch(batch)
@@ -127,7 +127,7 @@ class TrainingWorkflow:
         # Flush remaining buffer
         if buffer:
             batch = self._collate_raw(buffer)
-            if batch:
+            if batch['xlens']:
                 self._step_batch(batch)
 
         return {'steps': self._step, 'elapsed': time.time() - t0}
@@ -141,7 +141,7 @@ class TrainingWorkflow:
         t0 = time.time()
         for epoch in range(1, epochs + 1):
             for batch in loader:
-                if not batch:
+                if not batch['xlens']:
                     continue
                 loss = self._step_batch(batch)
                 self._step += 1
@@ -156,15 +156,14 @@ class TrainingWorkflow:
         xlens = batch['xlens']
         out   = self.model(x, xlens)
 
-        loss, _ = self.loss_fn(
-            out,
-            target_b   = batch['target_b'].to(self.device),
-            target_w   = batch['target_w'].to(self.device),
-            rank_b     = batch['rank_b'].to(self.device),
-            rank_w     = batch['rank_w'].to(self.device),
-            human_lp_b = batch['human_lp_b'].to(self.device),
-            human_lp_w = batch['human_lp_w'].to(self.device),
-        )
+        # KataRankLoss convention: loss_fn(predictions, targets) -> dict with 'total'
+        targets = {
+            k: batch[k].to(self.device)
+            for k in ('target_b', 'target_w', 'rank_b', 'rank_w',
+                      'human_lp_b', 'human_lp_w')
+        }
+        losses = self.loss_fn(out, targets)
+        loss = losses['total'] if isinstance(losses, dict) else losses
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -186,9 +185,13 @@ class TrainingWorkflow:
         if items and isinstance(items[0], dict) and 'game_id' in items[0]:
             return kab2_collate(items)
 
-        # Otherwise treat as stream_to_tensors output
+        # Otherwise treat as stream_to_tensors output (torch tensors)
         samples = []
         for moves_b, moves_w, info_b, info_w in items:
+            if isinstance(moves_b, torch.Tensor):
+                moves_b = moves_b.cpu().numpy()
+            if isinstance(moves_w, torch.Tensor):
+                moves_w = moves_w.cpu().numpy()
             samples.append(kab2_make_sample(
                 moves_b    = moves_b,
                 moves_w    = moves_w,
@@ -259,21 +262,148 @@ class InferenceWorkflow:
     @torch.no_grad()
     def _infer_one(self, x_b, x_w, info_b, info_w) -> RankResult:
         sample = kab2_make_sample(
-            moves_b = x_b,
-            moves_w = x_w,
+            moves_b = x_b.cpu().numpy(),
+            moves_w = x_w.cpu().numpy(),
             game_id = info_b.get('game_id', ''),
         )
         out = self.model(sample['x'].to(self.device), xlens=[sample['seq_len']])
 
-        def _rank_probs(logits):
-            return torch.softmax(logits, dim=-1).squeeze(0).cpu()
+        # KataRankModel.forward keys: b_rating / w_rating / rank_probs_b / rank_probs_w
+        # (rank_probs_* are already probabilities — no softmax here)
+        probs_b = out.get('rank_probs_b')
+        probs_w = out.get('rank_probs_w')
 
         return RankResult(
             game_id      = sample['game_id'],
-            b_log_prior  = out.get('b_log_prior', out.get('b_rating', torch.tensor(0.))).item(),
-            w_log_prior  = out.get('w_log_prior', out.get('w_rating', torch.tensor(0.))).item(),
-            b_rank_probs = _rank_probs(out['b_rank_logits']) if 'b_rank_logits' in out else None,
-            w_rank_probs = _rank_probs(out['w_rank_logits']) if 'w_rank_logits' in out else None,
-            b_rank_top   = int(out['b_rank_logits'].argmax(-1)) if 'b_rank_logits' in out else -1,
-            w_rank_top   = int(out['w_rank_logits'].argmax(-1)) if 'w_rank_logits' in out else -1,
+            b_rating     = out['b_rating'].item(),
+            w_rating     = out['w_rating'].item(),
+            b_rank_probs = probs_b.squeeze(0).cpu() if probs_b is not None else None,
+            w_rank_probs = probs_w.squeeze(0).cpu() if probs_w is not None else None,
+            b_rank_top   = int(probs_b.argmax(-1)) if probs_b is not None else -1,
+            w_rank_top   = int(probs_w.argmax(-1)) if probs_w is not None else -1,
         )
+
+
+# ─── RankResult / engine stats → KAB2Output ──────────────────────────────────
+#
+# Shared by the CLI (katarank-infer) and the REST API: both are thin shells
+# over these functions.
+
+def result_to_output(r: RankResult) -> KAB2Output:
+    """Convert an InferenceWorkflow RankResult into a KAB2Output.
+
+    Confidence = max rank-class probability (model's certainty about the
+    predicted rank), 0.0 when the model produced no rank distribution.
+    """
+    def _conf(probs):
+        return float(probs.max()) if probs is not None else 0.0
+
+    return KAB2Output(
+        game_id      = r['game_id'],
+        metadata     = {'source': 'model'},
+        b_rating     = r['b_rating'],
+        w_rating     = r['w_rating'],
+        b_rank       = r['b_rank_top'],
+        w_rank       = r['w_rank_top'],
+        b_confidence = _conf(r['b_rank_probs']),
+        w_confidence = _conf(r['w_rank_probs']),
+        b_rank_probs = r['b_rank_probs'].tolist() if r['b_rank_probs'] is not None else None,
+        w_rank_probs = r['w_rank_probs'].tolist() if r['w_rank_probs'] is not None else None,
+    )
+
+
+def engine_stats_outputs(stream: Iterable) -> List[KAB2Output]:
+    """Build KAB2Outputs from raw engine statistics, paired by game_id.
+
+    Used when no KataRankModel checkpoint is loaded: b_rating/w_rating fall
+    back to meanLogPrior; b_rank/w_rank to the HumanSL annotation (-1 if the
+    engine ran without -human-model). Confidence here is a heuristic in
+    [0, 1] derived from meanLogPrior magnitude — NOT comparable to the
+    model-based confidence in result_to_output().
+    """
+    games: Dict[str, KAB2Output] = {}
+    order: List[str] = []
+    for side, _moves, info in stream:
+        gid = info.get('game_id') or f'game_{len(order):04d}'
+        if gid not in games:
+            games[gid] = KAB2Output(
+                game_id=gid,
+                metadata={'source': 'engine'},
+                b_rating=0.0, w_rating=0.0,
+                b_rank=-1, w_rank=-1,
+                b_confidence=0.0, w_confidence=0.0,
+                b_rank_probs=None, w_rank_probs=None,
+            )
+            order.append(gid)
+        entry = games[gid]
+        confidence = max(0.0, min(1.0, 1.0 - abs(info['mean_log_prior']) / 10.0))
+        if side == 'B':
+            entry['b_rating']     = float(info['mean_log_prior'])
+            entry['b_rank']       = info['human_rank_idx']
+            entry['b_confidence'] = confidence
+        elif side == 'W':
+            entry['w_rating']     = float(info['mean_log_prior'])
+            entry['w_rank']       = info['human_rank_idx']
+            entry['w_confidence'] = confidence
+    return [games[g] for g in order]
+
+
+def run_rank_files(
+    engine, inf_workflow: Optional[InferenceWorkflow],
+    paths: List[str], mode: str = 'lite', min_moves: int = 10,
+) -> List[KAB2Output]:
+    """Rank SGF files: model inference if a workflow is given, engine stats otherwise.
+
+    KAB2Output.metadata is populated from the SGF headers (players, date,
+    rules, komi, result, ...), matched by game id = filename stem.
+    """
+    if inf_workflow is not None:
+        rr = inf_workflow.rank_files(paths, mode=mode, min_moves=min_moves)
+        outputs = [result_to_output(r) for r in rr]
+    else:
+        outputs = engine_stats_outputs(
+            engine.stream_games(sgf_paths=paths, mode=mode, min_moves=min_moves)
+        )
+    _attach_metadata_from_files(outputs, paths)
+    return outputs
+
+
+def run_rank_strings(
+    engine, inf_workflow: Optional[InferenceWorkflow],
+    strings: List[str], mode: str = 'lite', min_moves: int = 10,
+) -> List[KAB2Output]:
+    """Rank SGF strings: model inference if a workflow is given, engine stats otherwise.
+
+    KAB2Output.metadata is populated from the SGF headers; string inputs are
+    matched back via the deterministic '_string_NNNNNN' game ids.
+    """
+    if inf_workflow is not None:
+        rr = inf_workflow.rank_strings(strings, mode=mode, min_moves=min_moves)
+        outputs = [result_to_output(r) for r in rr]
+    else:
+        outputs = engine_stats_outputs(
+            engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves)
+        )
+    _attach_metadata_from_strings(outputs, strings)
+    return outputs
+
+
+def _attach_metadata_from_files(outputs: List[KAB2Output], paths: List[str]):
+    from pathlib import Path
+    from katarank.sgf_meta import read_sgf_metadata
+    by_stem = {Path(p).stem: p for p in paths}
+    for o in outputs:
+        p = by_stem.get(o['game_id'])
+        if p:
+            o['metadata'].update(read_sgf_metadata(p))
+
+
+def _attach_metadata_from_strings(outputs: List[KAB2Output], strings: List[str]):
+    import re
+    from katarank.sgf_meta import parse_sgf_metadata
+    for o in outputs:
+        m = re.fullmatch(r'_string_(\d+)', o['game_id'])
+        if m:
+            idx = int(m.group(1))
+            if idx < len(strings):
+                o['metadata'].update(parse_sgf_metadata(strings[idx]))

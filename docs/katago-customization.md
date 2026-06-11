@@ -27,12 +27,19 @@ Other backends (CUDA, Eigen) follow the same pattern but weren't modified since 
 
 ### 3. `batch_analysis` Command (`command/batch_analysis.cpp`, new file)
 
-A self-contained module (356 lines) that:
+A self-contained module (~900 lines) that:
 
 - Accepts `-list games.csv` or `-sgf-dir ./sgfs/`
-- For each SGF: loads game, extracts main line, skips < 10 moves
-- For each position: evaluates with NNEvaluator, collects head(12)+trunk(256)+pick(256) features
-- Writes per-player NPZ binary output
+- For each SGF: loads game, extracts main line, skips < `-min-moves` moves
+- For each position: evaluates with NNEvaluator, collects
+  scalars(10) + pick(C) + avgTrunk(C) features (KAB2 format)
+- Optional HumanSL second pass (`-human-model`) annotating each player
+  with a rank estimate (20k–9d) and confidence
+- File mode: one combined compressed `<stem>.npz` per game + `_meta.csv`
+- Stream mode (`-stream`): per-player frames on stdout tagged with the
+  game id; `-no-trunk` for scalars-only lite output
+- Daemon mode (`-daemon`): persistent process, jobs fed via stdin
+  (`reset` clears NN caches, `quit` exits) — models loaded once
 - Handles errors per-file and continues
 
 ### 4. Command Registration (`main.h/cpp`, +3 lines)
@@ -68,16 +75,29 @@ The total merge effort is **~30 lines**. Conflicts are unlikely because:
 
 ## Output Format
 
-### NPZ Binary
+### KAB2 combined file (file mode)
 
 ```
-Header:  [KABN][num_moves:4][12:4][256:4][256:4]
-Per move: head[12] + trunk[256] + pick[256] = 2096 bytes
+<sgf-stem>.npz = [4B B_size][B KAB2 payload][4B W_size][W KAB2 payload]
+KAB2 payload:    96-byte header (magic 'KAB2', dims, flags, PlayerSummary)
+                 + numMoves × (scalars[10] + pick[C] + avgTrunk[C]) float32
+                 (zlib compressed in file mode)
 ```
+
+### Stream protocol (stream/daemon mode)
+
+```
+[1B side 'B'/'W'][4B idLen][game id][4B size][KAB2 payload]   per player
+0x01 = end of daemon job        0x00 = end of stream / daemon exit
+```
+
+See the KataRank README for the full KAB2 header layout.
 
 ### CSV Metadata
 
-`_meta.csv` accompanies each batch run with game-level metadata.
+`_meta.csv` accompanies each file-mode batch run with game-level metadata
+(player names, move counts, PlayerSummary fields, HumanSL ranks). Stream
+and daemon modes write nothing to disk.
 
 ## References
 

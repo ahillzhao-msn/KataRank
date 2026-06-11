@@ -1,18 +1,18 @@
 """
 KataRank — KAB2 File Dataset
 =============================
-PyTorch Dataset for training KataRankModel on KAB2-format NPZ files.
+PyTorch Dataset for training KataRankModel on combined KAB2 NPZ files.
 
-File naming convention:
-    game_{id:016X}_B.npz   ← Black player's moves
-    game_{id:016X}_W.npz   ← White player's moves
+File naming convention (one combined file per game, written by
+`katago batch_analysis`):
+    <sgf-stem>.npz   ← [4B B_size][B KAB2][4B W_size][W KAB2]
 
 Inherits from BaseKAB2Dataset — each item is a KAB2Sample.
 """
 
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -24,7 +24,7 @@ from katarank.schema import (
     kab2_make_sample,
     kab2_collate,
 )
-from katarank.data.preprocess import read_kab2, probe_kab2_dim
+from katarank.data.preprocess import read_kab2_combined, probe_kab2_dim
 
 # ─── Rank string → integer index ──────────────────────────────────────────────
 
@@ -46,12 +46,16 @@ def rank_str_to_idx(s: str) -> int:
 
 class KAB2Dataset(BaseKAB2Dataset):
     """
-    Game-level dataset reading KAB2 binary NPZ files from disk.
+    Game-level dataset reading combined KAB2 .npz files from disk.
 
     Each __getitem__ returns one game: both players' move features packed
-    together, plus scalar training targets derived from the file headers.
+    together, plus scalar training targets derived from _meta.csv.
 
-    Implements BaseKAB2Dataset.map-style access.
+    Implements BaseKAB2Dataset map-style access.
+
+    Note: `cache=True` keeps decoded move arrays in memory. In full mode
+    (trunk features, ~2.4 MB per game) this can exhaust RAM on large
+    datasets — prefer cache=False there.
     """
 
     def __init__(
@@ -68,7 +72,7 @@ class KAB2Dataset(BaseKAB2Dataset):
         self.max_moves = max_moves_per_player
         self.min_moves = min_moves_per_player
         self.cache = cache
-        self._move_cache: Dict[str, np.ndarray] = {}
+        self._move_cache: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
 
         meta_path = meta_csv or str(self.data_dir / '_meta.csv')
         self.games = self._load_meta(meta_path, split)
@@ -87,6 +91,13 @@ class KAB2Dataset(BaseKAB2Dataset):
     def __len__(self) -> int:
         return len(self.games)
 
+    @staticmethod
+    def _float_or(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _load_meta(self, csv_path: str, split: str) -> List[Dict]:
         games = []
         with open(csv_path, 'r', newline='', encoding='utf-8', errors='replace') as f:
@@ -98,8 +109,8 @@ class KAB2Dataset(BaseKAB2Dataset):
                 rank_b_idx = rank_str_to_idx(row.get('B_humanRank', ''))
                 rank_w_idx = rank_str_to_idx(row.get('W_humanRank', ''))
 
-                b_hlp = float(row.get('B_humanLogPrior', 0.0))
-                w_hlp = float(row.get('W_humanLogPrior', 0.0))
+                b_hlp = self._float_or(row.get('B_humanLogPrior'))
+                w_hlp = self._float_or(row.get('W_humanLogPrior'))
                 if b_hlp == 0.0:
                     rank_b_idx = -1
                 if w_hlp == 0.0:
@@ -107,9 +118,8 @@ class KAB2Dataset(BaseKAB2Dataset):
 
                 games.append({
                     'id':          row['file'].strip(),
-                    'sgf_path':    row.get('sgf_path', '').strip(),
-                    'target_b':    float(row.get('B_logPrior', 0.0)),
-                    'target_w':    float(row.get('W_logPrior', 0.0)),
+                    'target_b':    self._float_or(row.get('B_logPrior')),
+                    'target_w':    self._float_or(row.get('W_logPrior')),
                     'rank_b':      rank_b_idx,
                     'rank_w':      rank_w_idx,
                     'human_lp_b':  b_hlp,
@@ -117,39 +127,45 @@ class KAB2Dataset(BaseKAB2Dataset):
                 })
         return games
 
+    def _game_path(self, game_id: str) -> Path:
+        return self.data_dir / f"{game_id}.npz"
+
     def _detect_input_dim(self) -> int:
         for g in self.games:
-            b_path = self.data_dir / f"{g['id']}_B.npz"
-            if b_path.exists():
-                return probe_kab2_dim(str(b_path))
+            path = self._game_path(g['id'])
+            if path.exists():
+                return probe_kab2_dim(str(path))
         raise FileNotFoundError(
-            f"No _B.npz files found in {self.data_dir}"
+            f"No combined .npz files found in {self.data_dir} "
+            f"(expected <sgf-stem>.npz as written by katago batch_analysis)"
         )
 
-    def _load_moves(self, game_id: str, side: str) -> np.ndarray:
-        key = f"{game_id}_{side}"
-        if self.cache and key in self._move_cache:
-            return self._move_cache[key]
+    def _load_game(self, game_id: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if self.cache and game_id in self._move_cache:
+            return self._move_cache[game_id]
 
-        path = str(self.data_dir / f"{game_id}_{side}.npz")
-        moves, _ = read_kab2(path)
+        b_moves, w_moves, _, _ = read_kab2_combined(str(self._game_path(game_id)))
 
-        if len(moves) > self.max_moves:
-            moves = moves[-self.max_moves:]
+        def _clip(moves):
+            if moves is None:
+                return None
+            if len(moves) > self.max_moves:
+                moves = moves[-self.max_moves:]
+            return np.ascontiguousarray(moves, dtype=np.float32)
 
-        moves = np.ascontiguousarray(moves, dtype=np.float32)
+        pair = (_clip(b_moves), _clip(w_moves))
         if self.cache:
-            self._move_cache[key] = moves
-        return moves
+            self._move_cache[game_id] = pair
+        return pair
 
     def __getitem__(self, idx: int) -> KAB2Sample:
         g = self.games[idx]
         gid = g['id']
 
-        b_moves = self._load_moves(gid, 'B')
-        w_moves = self._load_moves(gid, 'W')
+        b_moves, w_moves = self._load_game(gid)
 
-        if len(b_moves) < self.min_moves or len(w_moves) < self.min_moves:
+        if (b_moves is None or w_moves is None
+                or len(b_moves) < self.min_moves or len(w_moves) < self.min_moves):
             return self._empty_sample(g)
 
         return kab2_make_sample(

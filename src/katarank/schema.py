@@ -1,6 +1,6 @@
 """
-KataRank — KataRank — Data Schema
-=========================
+KataRank — Data Schema
+=======================
 Defines the canonical data contract for the project.
 
 - BaseKAB2Dataset: abstract base for all data sources
@@ -153,19 +153,30 @@ class KAB2Output(TypedDict):
     """Model inference output — one per game, symmetric with KAB2Sample.
 
     Core output: per-player rating + rank + confidence.
-    Optional: full rank probability distributions (29-dim softmax).
+    Optional: full rank probability distributions (29-dim).
+
+    Confidence semantics (always in [0, 1]; check metadata['source']):
+      source='model'  — max rank-class probability from the trained
+                        KataRankModel (its certainty about the argmax rank)
+      source='engine' — heuristic 1 - |meanLogPrior|/10, clamped; a rough
+                        signal quality proxy, NOT comparable to model
+                        confidence
+
+    metadata carries SGF header fields when available: player_black,
+    player_white, black_rank, white_rank, date, rules, komi, result,
+    board_size, event, handicap — plus 'source' as above.
     """
     game_id:    str
-    metadata:   Dict          # 棋局元数据（日期、规则、贴目、棋手名等）
+    metadata:   Dict          # game metadata (date, rules, komi, player names, ...)
 
     b_rating:   float
     w_rating:   float
     b_rank:     int           # 0=20k … 28=9d
     w_rank:     int
-    b_confidence: float       # 可靠性（棋谱质量、手数等）
+    b_confidence: float       # reliability (game quality, move count, ...)
     w_confidence: float
 
-    b_rank_probs: Optional[List[float]]  # 29-dim softmax 输出
+    b_rank_probs: Optional[List[float]]  # 29-dim probability distribution
     w_rank_probs: Optional[List[float]]
 
 
@@ -179,6 +190,50 @@ RANK_NAMES = [
 def rank_idx_to_str(idx: int) -> str:
     """Convert rank index 0..28 → '20k' … '9d'. Returns '?' for invalid."""
     return RANK_NAMES[idx] if 0 <= idx < len(RANK_NAMES) else '?'
+
+
+# ─── Training output ─────────────────────────────────────────────────────────
+
+class TrainingReport(TypedDict):
+    """Training run summary — the canonical training output, symmetric with
+    KAB2Output on the inference side. Written next to the checkpoints.
+
+    final_metrics keys (computed on the validation split):
+        rank_mae       mean |predicted - label| in rank steps (stones)
+        rank_acc       exact rank accuracy
+        rank_acc_pm1   accuracy within ±1 rank
+        rating_corr    Pearson r between predicted rating and meanLogPrior
+        n_rank_labeled number of player-sides with HumanSL labels
+    """
+    version:          str           # report schema version
+    created_at:       str           # ISO-8601 timestamp
+    model_config:     Dict          # KataRankModel config snapshot
+    training_config:  Dict          # training section snapshot
+    data:             Dict          # games per split, label coverage, input_dim
+    epochs_trained:   int
+    early_stopped:    bool
+    best_epoch:       int
+    best_val_loss:    float
+    train_loss:       List[float]   # per epoch
+    val_loss:         List[float]   # per epoch
+    final_metrics:    Dict
+    ordinal_thresholds_b: List[float]   # learned rank boundaries (strength axis)
+    ordinal_thresholds_w: List[float]
+    elapsed_seconds:  float
+
+
+def save_training_report(report: TrainingReport, path: str):
+    """Save a TrainingReport as JSON."""
+    import json
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(dict(report), f, ensure_ascii=False, indent=2)
+
+
+def load_training_report(path: str) -> TrainingReport:
+    """Load a TrainingReport from JSON."""
+    import json
+    with open(path, 'r', encoding='utf-8') as f:
+        return TrainingReport(**json.load(f))
 
 
 # ─── Serialization ───────────────────────────────────────────────────────────
@@ -225,19 +280,30 @@ def load_output(path: str) -> KAB2Output:
 
 
 def save_outputs_batch(outputs: List[KAB2Output], path: str):
-    """Save multiple KAB2Outputs as JSONL (.jsonl or .jsonl.gz)."""
+    """Save multiple KAB2Outputs.
+
+    .jsonl / .jsonl.gz — one JSON object per line (stream friendly)
+    .json  / .json.gz  — single JSON array (archive friendly)
+    """
     import json as _json
-    if path.endswith('.jsonl.gz'):
-        import gzip
-        with gzip.open(path, 'wt', encoding='utf-8') as f:
+
+    def _open(p):
+        if p.endswith('.gz'):
+            import gzip
+            return gzip.open(p, 'wt', encoding='utf-8')
+        return open(p, 'w', encoding='utf-8')
+
+    if path.endswith('.jsonl') or path.endswith('.jsonl.gz'):
+        with _open(path) as f:
             for o in outputs:
                 f.write(_json.dumps(dict(o), ensure_ascii=False) + '\n')
-    elif path.endswith('.jsonl'):
-        with open(path, 'w', encoding='utf-8') as f:
-            for o in outputs:
-                f.write(_json.dumps(dict(o), ensure_ascii=False) + '\n')
+    elif path.endswith('.json') or path.endswith('.json.gz'):
+        with _open(path) as f:
+            _json.dump([dict(o) for o in outputs], f, ensure_ascii=False, indent=2)
     else:
-        raise ValueError(f"Unsupported extension: {path} (use .jsonl or .jsonl.gz)")
+        raise ValueError(
+            f"Unsupported extension: {path} (use .json[.gz] or .jsonl[.gz])"
+        )
 
 
 def load_outputs_batch(path: str) -> List[KAB2Output]:

@@ -50,8 +50,18 @@ class KAB2StreamDataset(IterableDataset, BaseKAB2Dataset):
         mode: str = 'full',
         min_moves: int = 5,
         max_moves: int = 400,
+        require_human_model: bool = True,
         **engine_kwargs,
     ):
+        # This dataset feeds training; training needs HumanSL rank anchors,
+        # so the engine must run with -human-model. Pass
+        # require_human_model=False only for label-free experiments.
+        if require_human_model and engine.human_model is None:
+            raise ValueError(
+                "KAB2StreamDataset feeds training, which requires HumanSL rank "
+                "labels. Construct the engine with human_model='<human.bin.gz>' "
+                "or pass require_human_model=False explicitly."
+            )
         self._engine      = engine
         self._mode        = mode
         self._min_moves   = min_moves
@@ -73,8 +83,7 @@ class KAB2StreamDataset(IterableDataset, BaseKAB2Dataset):
     def input_dim(self) -> int:
         if self._input_dim is None:
             raise RuntimeError(
-                "input_dim not yet known — iterate at least one sample first, "
-                "or pass hint_input_dim= to constructor."
+                "input_dim not yet known — iterate at least one sample first."
             )
         return self._input_dim
 

@@ -9,12 +9,16 @@ Usage:
 import os
 import time
 import argparse
+from datetime import datetime, timezone
+
+import numpy as np
 import yaml
 import torch
 import torch.optim as optim
 
 from katarank.model import KataRankModel, KataRankLoss
 from katarank.data.datasets import KAB2Dataset, make_kab2_loader
+from katarank.schema import TrainingReport, save_training_report
 
 
 def _device(cfg_val: str) -> torch.device:
@@ -49,30 +53,30 @@ class Trainer:
         self.patience = config.get('patience', 20)
         self.best_val_loss = float('inf')
         self.best_state = None
+        self.best_epoch = 0
         self.bad_epochs = 0
+        self.early_stopped = False
+        self.train_hist: list = []
+        self.val_hist: list = []
 
-    def _forward(self, batch):
+    def _batch_loss(self, batch) -> torch.Tensor:
         x     = batch['x'].to(self.device)
         xlens = batch['xlens']
         out   = self.model(x, xlens)
-        return out, batch
+        targets = {
+            k: batch[k].to(self.device)
+            for k in ('target_b', 'target_w', 'rank_b', 'rank_w',
+                      'human_lp_b', 'human_lp_w')
+        }
+        return self.loss_fn(out, targets)['total']
 
     def train_epoch(self) -> float:
         self.model.train()
         total, n = 0.0, 0
         for batch in self.train_loader:
-            if not batch:
+            if not batch['xlens']:
                 continue
-            out, b = self._forward(batch)
-            loss, _ = self.loss_fn(
-                out,
-                target_b    = b['target_b'].to(self.device),
-                target_w    = b['target_w'].to(self.device),
-                rank_b      = b['rank_b'].to(self.device),
-                rank_w      = b['rank_w'].to(self.device),
-                human_lp_b  = b['human_lp_b'].to(self.device),
-                human_lp_w  = b['human_lp_w'].to(self.device),
-            )
+            loss = self._batch_loss(batch)
             self.optimizer.zero_grad()
             loss.backward()
             if self.gradient_clip > 0:
@@ -87,19 +91,9 @@ class Trainer:
         self.model.eval()
         total, n = 0.0, 0
         for batch in self.val_loader:
-            if not batch:
+            if not batch['xlens']:
                 continue
-            out, b = self._forward(batch)
-            loss, _ = self.loss_fn(
-                out,
-                target_b    = b['target_b'].to(self.device),
-                target_w    = b['target_w'].to(self.device),
-                rank_b      = b['rank_b'].to(self.device),
-                rank_w      = b['rank_w'].to(self.device),
-                human_lp_b  = b['human_lp_b'].to(self.device),
-                human_lp_w  = b['human_lp_w'].to(self.device),
-            )
-            total += loss.item()
+            total += self._batch_loss(batch).item()
             n += 1
         return {'val_loss': total / max(n, 1)}
 
@@ -109,12 +103,16 @@ class Trainer:
               f"val={len(self.val_loader.dataset)}")
         print("-" * 60)
 
+        epoch = 0
         for epoch in range(1, epochs + 1):
             t0 = time.time()
             train_loss = self.train_epoch()
             val = self.validate()
             dt = time.time() - t0
             lr = self.optimizer.param_groups[0]['lr']
+
+            self.train_hist.append(round(train_loss, 6))
+            self.val_hist.append(round(val['val_loss'], 6))
 
             print(f"Epoch {epoch:3d}/{epochs}  train={train_loss:.4f}  "
                   f"val={val['val_loss']:.4f}  lr={lr:.2e}  ({dt:.1f}s)")
@@ -123,6 +121,7 @@ class Trainer:
 
             if val['val_loss'] < self.best_val_loss:
                 self.best_val_loss = val['val_loss']
+                self.best_epoch = epoch
                 self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
                 self.bad_epochs = 0
                 self.model.save(os.path.join(ckpt_dir, 'best.pt'))
@@ -130,12 +129,47 @@ class Trainer:
                 self.bad_epochs += 1
                 if self.bad_epochs >= self.patience:
                     print(f"Early stopping at epoch {epoch}")
+                    self.early_stopped = True
                     break
 
         if self.best_state:
             self.model.load_state_dict(self.best_state)
 
         return {'best_val_loss': self.best_val_loss, 'epochs_trained': epoch}
+
+
+# ─── Validation metrics (for TrainingReport) ─────────────────────────────────
+
+@torch.no_grad()
+def evaluate_metrics(model, loader, device) -> dict:
+    """Rank/rating quality on a validation loader. See TrainingReport docs."""
+    model.eval()
+    ratings_pred, ratings_tgt = [], []
+    rank_pred, rank_lab = [], []
+
+    for batch in loader:
+        if not batch['xlens']:
+            continue
+        out = model(batch['x'].to(device), batch['xlens'])
+        for side, key in (('b', 'rank_b'), ('w', 'rank_w')):
+            pred = out[f'rank_probs_{side}'].argmax(-1).cpu()
+            lab  = batch[key]
+            mask = lab >= 0
+            rank_pred += pred[mask].tolist()
+            rank_lab  += lab[mask].tolist()
+        ratings_pred += out['b_rating'].cpu().tolist() + out['w_rating'].cpu().tolist()
+        ratings_tgt  += batch['target_b'].tolist() + batch['target_w'].tolist()
+
+    metrics = {'n_rank_labeled': len(rank_lab)}
+    if rank_lab:
+        diff = np.abs(np.asarray(rank_pred) - np.asarray(rank_lab))
+        metrics['rank_mae']     = float(diff.mean())
+        metrics['rank_acc']     = float((diff == 0).mean())
+        metrics['rank_acc_pm1'] = float((diff <= 1).mean())
+    if len(ratings_pred) > 1:
+        corr = np.corrcoef(ratings_pred, ratings_tgt)[0, 1]
+        metrics['rating_corr'] = float(corr) if np.isfinite(corr) else 0.0
+    return metrics
 
 
 def main():
@@ -177,7 +211,7 @@ def main():
         max_moves_per_player = tc.get('max_moves', 400),
         min_moves_per_player = tc.get('min_moves', 5),
     )
-    val_loader, _ = make_kab2_loader(
+    val_loader, val_ds = make_kab2_loader(
         data_dir    = tc['data_dir'],
         meta_csv    = tc.get('meta_csv'),
         split       = tc.get('val_split', 'V'),
@@ -188,6 +222,18 @@ def main():
         min_moves_per_player = tc.get('min_moves', 5),
     )
 
+    # Training requires HumanSL rank anchors: the data must have been
+    # generated with -human-model. Inference does not need them.
+    labeled = sum(1 for g in train_ds.games if g['rank_b'] >= 0 or g['rank_w'] >= 0)
+    if labeled == 0:
+        raise SystemExit(
+            "ERROR: no HumanSL rank labels found in the training split.\n"
+            "Training data must be generated with:  katago batch_analysis "
+            "-human-model <human.bin.gz> ...\n"
+            "(humanRankIdx is -1 for every game in _meta.csv)"
+        )
+    print(f"  HumanSL labels: {labeled}/{len(train_ds.games)} games")
+
     print("\nBuilding model...")
     model = KataRankModel(
         input_dim    = train_ds.input_dim,
@@ -197,16 +243,16 @@ def main():
         encoder_depth= mc.get('encoder_depth', 2),
         cross_depth  = mc.get('cross_depth', 1),
         dropout      = mc.get('dropout', 0.1),
-        num_rank_classes = mc.get('num_rank_classes', 29),
+        n_rank_classes = mc.get('num_rank_classes', 29),
     )
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Input dim:  {train_ds.input_dim}")
 
     lw = tc.get('loss_weights', {})
     loss_fn = KataRankLoss(
-        rating_w   = lw.get('rating_mse', 1.0),
-        bt_w       = lw.get('bradley_terry', 0.5),
-        rank_w     = lw.get('rank_anchor', 0.3),
+        w_rating = lw.get('rating_mse', 1.0),
+        w_bt     = lw.get('bradley_terry', 0.5),
+        w_rank   = lw.get('rank_anchor', 0.3),
     )
 
     if args.resume:
@@ -222,16 +268,52 @@ def main():
         config       = tc,
     )
 
+    ckpt_dir = oc.get('checkpoint_dir', 'nets/katarank')
+    t_start = time.time()
+
     print("\nStarting training...")
     result = trainer.train(
         epochs   = tc.get('epochs', 100),
-        ckpt_dir = oc.get('checkpoint_dir', 'nets/katarank'),
+        ckpt_dir = ckpt_dir,
     )
 
-    model.save(os.path.join(oc.get('checkpoint_dir', 'nets/katarank'), 'final.pt'))
+    model.save(os.path.join(ckpt_dir, 'final.pt'))
+
+    # ── TrainingReport: the canonical training output ─────────────────────────
+    print("\nComputing validation metrics...")
+    final_metrics = evaluate_metrics(model, val_loader, trainer.device)
+
+    val_labeled = sum(1 for g in val_ds.games if g['rank_b'] >= 0 or g['rank_w'] >= 0)
+    report = TrainingReport(
+        version          = '1.0',
+        created_at       = datetime.now(timezone.utc).isoformat(),
+        model_config     = model.get_config(),
+        training_config  = dict(tc),
+        data             = {
+            'train_games':        len(train_ds.games),
+            'val_games':          len(val_ds.games),
+            'train_rank_labeled': labeled,
+            'val_rank_labeled':   val_labeled,
+            'input_dim':          train_ds.input_dim,
+        },
+        epochs_trained   = result['epochs_trained'],
+        early_stopped    = trainer.early_stopped,
+        best_epoch       = trainer.best_epoch,
+        best_val_loss    = trainer.best_val_loss,
+        train_loss       = trainer.train_hist,
+        val_loss         = trainer.val_hist,
+        final_metrics    = final_metrics,
+        ordinal_thresholds_b = model.rank_head_b.thresholds.detach().cpu().tolist(),
+        ordinal_thresholds_w = model.rank_head_w.thresholds.detach().cpu().tolist(),
+        elapsed_seconds  = round(time.time() - t_start, 1),
+    )
+    report_path = os.path.join(ckpt_dir, 'training_report.json')
+    save_training_report(report, report_path)
 
     print(f"\nDone — best val loss: {result['best_val_loss']:.4f}  "
           f"epochs: {result['epochs_trained']}")
+    print(f"  metrics: {final_metrics}")
+    print(f"  report:  {report_path}")
 
 
 if __name__ == '__main__':

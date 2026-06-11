@@ -1,6 +1,6 @@
 [project]
 name = "katarank"
-version = "0.1.0"
+version = "0.2.0"
 description = "Go player rank assessment via KataGo neural analysis"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,8 @@ dependencies = [
 api  = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 
 [project.scripts]
-katarank-train  = "katarank.train.train_kata_native:main"
+katarank-infer  = "katarank.cli:main"
+katarank-train  = "katarank.train.training:main"
 katarank-server = "katarank.api.server:main"
 
 [build-system]

@@ -8,8 +8,11 @@ Two analysis modes:
   'lite'    — scalars only (10 dims), for fast inference
 
 Two delivery modes:
-  stream    — KAB2 frames via stdout pipe (zero disk I/O)
-  file      — _B.npz/_W.npz files to output_dir
+  stream    — uncompressed KAB2 frames via stdout pipe (zero disk I/O),
+              one frame per player tagged with the game id (SGF stem):
+              [1B side][4B idLen][game id][4B size][payload], 0x00 terminator
+  file      — one combined compressed <stem>.npz per game to output_dir:
+              [4B B_size][B KAB2][4B W_size][W KAB2]
 
 Input types supported:
   - SGF file paths (list or single string)
@@ -43,7 +46,9 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
 import zlib
+from collections import deque
 from pathlib import Path
 from typing import Dict, Generator, Iterable, List, Optional, Tuple, Union
 
@@ -61,9 +66,9 @@ _SUM_MEAN_LP      = 2
 _SUM_HUMAN_RANK   = 10
 _SUM_HUMAN_LP     = 11
 
-# Stream protocol constants
-_FRAME_HEADER  = 5   # 1 byte side + 4 bytes uint32 size
-_TERMINATOR    = b'\x00'
+# Stream protocol: [1B side][4B uint32 idLen][game id][4B uint32 size][payload]
+_TERMINATOR = b'\x00'   # daemon/process exit
+_JOB_DONE   = b'\x01'   # end of one daemon job
 
 
 # ─── Low-level KAB2 parser (bytes → ndarray) ──────────────────────────────────
@@ -255,6 +260,7 @@ class KataGoEngine:
 
         Yields:
             (side, moves, info) per player per game.
+            info['game_id'] carries the SGF filename stem from the stream frame.
         """
         inp = SgfInput(sgf_paths=sgf_paths, sgf_strings=sgf_strings, sgf_dir=sgf_dir, csv=csv)
         csv_path, tmp = inp.resolve()
@@ -276,29 +282,75 @@ class KataGoEngine:
             bufsize=0,
         )
 
+        # Drain stderr in a background thread: katago writes progress there,
+        # and an undrained pipe fills its buffer and deadlocks the process.
+        stderr_tail: deque = deque(maxlen=50)
+        def _drain():
+            for line in iter(proc.stderr.readline, b''):
+                stderr_tail.append(line.decode('utf-8', errors='replace'))
+        drainer = threading.Thread(target=_drain, daemon=True)
+        drainer.start()
+
         try:
             yield from self._read_stream(proc.stdout)
         finally:
             proc.stdout.close()
             proc.wait()
+            drainer.join(timeout=5)
             if tmp is not None:
                 tmp.cleanup()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"katago batch_analysis exited with code {proc.returncode}\n"
+                    + ''.join(stderr_tail)
+                )
 
-    def _read_stream(self, pipe) -> Generator[Tuple[str, np.ndarray, Dict], None, None]:
-        """Parse the length-prefixed KAB2 stream from stdout pipe."""
-        while True:
-            hdr = pipe.read(_FRAME_HEADER)
-            if not hdr or len(hdr) < _FRAME_HEADER:
+    @staticmethod
+    def _read_exact(pipe, n: int) -> bytes:
+        """Read exactly n bytes from pipe (or fewer at EOF)."""
+        chunks = []
+        remaining = n
+        while remaining > 0:
+            chunk = pipe.read(remaining)
+            if not chunk:
                 break
-            side_byte = hdr[0:1]
-            if side_byte == _TERMINATOR:
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b''.join(chunks)
+
+    def _read_stream(
+        self, pipe, stop_at_job_marker: bool = False,
+    ) -> Generator[Tuple[str, np.ndarray, Dict], None, None]:
+        """Parse the game-id-tagged KAB2 stream from stdout pipe.
+
+        Frame: [1B side][4B uint32 idLen][game id][4B uint32 size][payload].
+        A single 0x00 byte terminates the stream; in daemon mode a 0x01
+        byte marks the end of one job (set stop_at_job_marker=True).
+        """
+        while True:
+            side_byte = self._read_exact(pipe, 1)
+            if not side_byte or side_byte == _TERMINATOR:
+                break
+            if stop_at_job_marker and side_byte == _JOB_DONE:
                 break
             side = chr(side_byte[0])
-            size = struct.unpack_from('<I', hdr, 1)[0]
-            data = pipe.read(size)
+
+            id_len_raw = self._read_exact(pipe, 4)
+            if len(id_len_raw) < 4:
+                break
+            id_len = struct.unpack('<I', id_len_raw)[0]
+            game_id = self._read_exact(pipe, id_len).decode('utf-8', errors='replace')
+
+            size_raw = self._read_exact(pipe, 4)
+            if len(size_raw) < 4:
+                break
+            size = struct.unpack('<I', size_raw)[0]
+            data = self._read_exact(pipe, size)
             if len(data) < size:
                 break
+
             moves, info = parse_kab2_buffer(data)
+            info['game_id'] = game_id
             yield side, moves, info
 
     # ── File mode ─────────────────────────────────────────────────────────────
@@ -316,7 +368,9 @@ class KataGoEngine:
         max_games: int = 0,
     ) -> int:
         """
-        Run batch_analysis writing _B.npz/_W.npz files to output_dir.
+        Run batch_analysis writing one combined <stem>.npz per game to
+        output_dir ([4B B_size][B KAB2][4B W_size][W KAB2], zlib compressed),
+        plus a _meta.csv with per-game summaries.
 
         Args:
             output_dir:  Directory for output .npz files.
@@ -363,19 +417,220 @@ class KataGoEngine:
         """
         Convenience: stream_games() → per-game (x_b, x_w, info_b, info_w).
 
+        Frames are paired by game_id, so a game whose B or W side was
+        dropped by katago (fewer than 5 moves) is skipped with a warning
+        instead of silently corrupting the pairing.
+
         Yields torch tensors on `device`, ready for model.forward().
         """
         import torch
+        import warnings
 
-        buf_b: Optional[Tuple] = None
+        pending: Dict[str, Tuple[str, 'torch.Tensor', Dict]] = {}
         gen = self.stream_games(
             sgf_paths, sgf_strings=sgf_strings, sgf_dir=sgf_dir, csv=csv,
             mode=mode, **stream_kwargs,
         )
         for side, moves, info in gen:
             x = torch.from_numpy(moves).to(device)
-            if side == 'B':
-                buf_b = (x, info)
-            elif side == 'W' and buf_b is not None:
-                yield buf_b[0], x, buf_b[1], info
-                buf_b = None
+            gid = info.get('game_id', '')
+            if gid not in pending:
+                pending[gid] = (side, x, info)
+                continue
+            prev_side, prev_x, prev_info = pending.pop(gid)
+            if prev_side == side:
+                warnings.warn(f"Duplicate '{side}' frame for game {gid!r}; keeping latest")
+                pending[gid] = (side, x, info)
+                continue
+            if side == 'W':
+                yield prev_x, x, prev_info, info
+            else:
+                yield x, prev_x, info, prev_info
+
+        for gid, (side, _, _) in pending.items():
+            warnings.warn(
+                f"Game {gid!r}: only side '{side}' received (other side <5 moves?) — skipped"
+            )
+
+
+# ─── Persistent engine (daemon mode) ─────────────────────────────────────────
+
+class PersistentKataGoEngine(KataGoEngine):
+    """
+    Long-lived `katago batch_analysis -daemon` process.
+
+    Model weights are loaded once at start(); each stream_games() call
+    becomes a stdin job line instead of a fresh process, cutting per-call
+    latency from ~tens of seconds (model load) to the analysis time itself.
+
+    The analysis mode (lite/full) is fixed at start. Drop-in compatible with
+    KataGoEngine.stream_games(); calls requesting a different mode fall back
+    to a one-shot subprocess with a warning.
+
+    Usage::
+
+        with PersistentKataGoEngine(model='kata1.bin.gz', mode='lite') as eng:
+            for side, moves, info in eng.stream_games(['g1.sgf']):
+                ...
+            for side, moves, info in eng.stream_games(['g2.sgf']):
+                ...   # no model reload between calls
+    """
+
+    def __init__(
+        self,
+        model: str,
+        config: Optional[str] = None,
+        human_model: Optional[str] = None,
+        katago_bin: Optional[str] = None,
+        mode: str = 'lite',
+        min_moves: int = 10,
+    ):
+        super().__init__(model=model, config=config,
+                         human_model=human_model, katago_bin=katago_bin)
+        self.mode = mode
+        self.min_moves = min_moves
+        self._proc: Optional[subprocess.Popen] = None
+        self._stderr_tail: deque = deque(maxlen=100)
+        self._lock = threading.Lock()
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    def start(self) -> 'PersistentKataGoEngine':
+        """Spawn the daemon and wait until it reports ready."""
+        if self._proc is not None:
+            return self
+
+        cmd = self._base_cmd() + ['-daemon', '-min-moves', str(self.min_moves)]
+        if self.mode == 'lite':
+            cmd.append('-no-trunk')
+
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+
+        ready = threading.Event()
+        def _drain():
+            for line in iter(self._proc.stderr.readline, b''):
+                text = line.decode('utf-8', errors='replace')
+                self._stderr_tail.append(text)
+                if 'daemon: ready' in text:
+                    ready.set()
+        self._drainer = threading.Thread(target=_drain, daemon=True)
+        self._drainer.start()
+
+        # Model load can take tens of seconds (GPU tuning on first run)
+        while not ready.wait(timeout=1.0):
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"katago daemon exited with code {self._proc.returncode} "
+                    f"during startup\n" + ''.join(self._stderr_tail)
+                )
+        return self
+
+    def close(self, force: bool = False):
+        """Stop the daemon.
+
+        force=False — graceful: send 'quit', kill only on timeout.
+        force=True  — kill immediately (wedged process / hung job).
+        """
+        if self._proc is None:
+            return
+        try:
+            if force:
+                self._proc.kill()
+                self._proc.wait(timeout=5)
+            elif self._proc.poll() is None:
+                self._proc.stdin.write(b'quit\n')
+                self._proc.stdin.flush()
+                self._proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            self._proc.kill()
+        finally:
+            self._proc = None
+
+    def soft_reset(self):
+        """Clear the daemon's NN caches and counters without reloading models.
+
+        Cheap (~ms). Use between unrelated workloads or to free cache memory.
+        Raises RuntimeError if the daemon is not running or died.
+        """
+        if self._proc is None or self._proc.poll() is not None:
+            raise RuntimeError("daemon not running — call start() first")
+        with self._lock:
+            self._proc.stdin.write(b'reset\n')
+            self._proc.stdin.flush()
+            # The daemon acknowledges with the 0x01 job marker (no frames)
+            for _ in self._read_stream(self._proc.stdout, stop_at_job_marker=True):
+                pass
+
+    def restart(self) -> 'PersistentKataGoEngine':
+        """Hard reset: kill the process and start a fresh one (reloads models).
+
+        Use when the daemon is wedged, leaks memory, or after a GPU error.
+        """
+        self.close(force=True)
+        return self.start()
+
+    def __enter__(self) -> 'PersistentKataGoEngine':
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.close()
+
+    # ── job submission (same interface as KataGoEngine.stream_games) ─────────
+
+    def stream_games(
+        self,
+        sgf_paths: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        sgf_strings: Optional[Iterable[str]] = None,
+        sgf_dir: Optional[str] = None,
+        csv: Optional[str] = None,
+        mode: Optional[str] = None,
+        min_moves: Optional[int] = None,
+        max_games: int = 0,
+    ) -> Generator[Tuple[str, np.ndarray, Dict], None, None]:
+        """Submit one job to the daemon and yield its frames.
+
+        mode/min_moves are fixed at daemon start; a different requested mode
+        falls back to a one-shot subprocess (slow path) with a warning.
+        """
+        if mode is not None and mode != self.mode:
+            import warnings
+            warnings.warn(
+                f"PersistentKataGoEngine runs mode='{self.mode}'; request for "
+                f"'{mode}' falls back to a one-shot subprocess"
+            )
+            yield from super().stream_games(
+                sgf_paths, sgf_strings=sgf_strings, sgf_dir=sgf_dir, csv=csv,
+                mode=mode, min_moves=min_moves or self.min_moves,
+                max_games=max_games,
+            )
+            return
+
+        if self._proc is None:
+            self.start()
+
+        inp = SgfInput(sgf_paths=sgf_paths, sgf_strings=sgf_strings,
+                       sgf_dir=sgf_dir, csv=csv)
+        csv_path, tmp = inp.resolve()
+
+        # One job at a time: frames of concurrent jobs would interleave.
+        with self._lock:
+            try:
+                if self._proc.poll() is not None:
+                    raise RuntimeError(
+                        f"katago daemon died (code {self._proc.returncode})\n"
+                        + ''.join(self._stderr_tail)
+                    )
+                self._proc.stdin.write(csv_path.encode('utf-8') + b'\n')
+                self._proc.stdin.flush()
+                yield from self._read_stream(self._proc.stdout,
+                                             stop_at_job_marker=True)
+            finally:
+                if tmp is not None:
+                    tmp.cleanup()

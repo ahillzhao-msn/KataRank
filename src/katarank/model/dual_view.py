@@ -9,7 +9,8 @@ Architecture:
 Key design choices:
   - Causal cross-attention: masks prevent future-move information leakage
   - Segmented attention pooling: opening / midgame / endgame weighted separately
-  - turn_number (scalar[8]) propagated from split through cross-attention
+  - Turn numbers derived from positional index per stream (B: 0,2,4…; W: 1,3,5…)
+    and propagated through cross-attention for causal masking
   - No double-residual: CausalMAB owns the full residual path
 """
 

@@ -36,7 +36,7 @@ Scalar layout per move (10 fields)
 
 import struct
 import zlib
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -57,19 +57,35 @@ KAB2_SCALAR_IS_WHITE   = 7
 KAB2_SCALAR_WIN_DELTA  = 8
 
 
+def _is_combined(raw: bytes) -> bool:
+    """Detect combined format: [4B B_size][B KAB2][4B W_size][W KAB2].
+
+    The KAB2 magic sits at offset 4 (B present) or offset 8 (B empty:
+    the first 4 bytes are a zero size, the next 4 the W size).
+    """
+    if len(raw) > 8 and raw[4:8] == _MAGIC:
+        return True
+    if len(raw) > 12 and raw[:4] == b'\x00\x00\x00\x00' and raw[8:12] == _MAGIC:
+        return True
+    return False
+
+
 def read_kab2(path: str) -> Tuple[np.ndarray, Dict]:
     """Read a KAB2 file (single or combined) and return (moves, info).
 
-    For combined .npz files (B+W in one file), returns Black player data.
+    For combined .npz files (B+W in one file), returns Black player data,
+    falling back to White if the Black side is empty.
     Use read_kab2_combined() to get both players.
     """
     with open(path, 'rb') as f:
         raw = f.read()
-    # Auto-detect: combined format starts with uint32 size, then KAB2 magic
-    if len(raw) > 8 and raw[4:8] == _MAGIC:
-        b_sz = struct.unpack_from('<I', raw, 0)[0]
-        if b_sz > 0:
-            return _parse_kab2(raw[4: 4 + b_sz])
+    if _is_combined(raw):
+        b_moves, w_moves, b_info, w_info = _parse_combined(raw, path)
+        if b_moves is not None:
+            return b_moves, b_info
+        if w_moves is not None:
+            return w_moves, w_info
+        raise ValueError(f"Combined KAB2 file has no player data: {path}")
     # Old single format
     return _parse_kab2(raw)
 
@@ -80,13 +96,12 @@ def probe_kab2_dim(path: str) -> int:
     Handles both old single and new combined .npz formats.
     """
     with open(path, 'rb') as f:
-        header = f.read(_HEADER_SIZE + 8)  # enough for combined header too
-    # Combined format: bytes 4-7 hold KAB2 magic
-    if len(header) > 8 and header[4:8] == _MAGIC:
-        b_sz = struct.unpack_from('<I', header, 0)[0]
-        if b_sz >= _HEADER_SIZE:
-            scalar_dim = struct.unpack_from('<i', header, 12)[0]
-            trunk_dim  = struct.unpack_from('<i', header, 16)[0]
+        header = f.read(_HEADER_SIZE + 12)  # enough for combined header too
+    # Combined: KAB2 magic at offset 4 (B present) or 8 (B empty, W present)
+    for off in (4, 8):
+        if len(header) >= off + 20 and header[off: off + 4] == _MAGIC:
+            scalar_dim = struct.unpack_from('<i', header, off + 8)[0]
+            trunk_dim  = struct.unpack_from('<i', header, off + 12)[0]
             return scalar_dim + 2 * trunk_dim
     # Old single format: header starts at byte 0
     if header[:4] != _MAGIC:
@@ -133,18 +148,32 @@ def _parse_kab2(raw: bytes) -> Tuple[np.ndarray, Dict]:
 
 # ─── Combined KAB2 pair reader ───────────────────────────────────────────────
 
-def read_kab2_combined(path: str) -> Tuple[np.ndarray, np.ndarray, Dict, Dict]:
+def read_kab2_combined(
+    path: str,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict, Dict]:
     """
-    Read a .kab2pair file containing both Black and White KAB2 payloads.
+    Read a combined .npz file containing both Black and White KAB2 payloads.
 
     Format: [4B B_payload_size][B_KAB2_payload][4B W_payload_size][W_KAB2_payload]
-    Returns (b_moves, w_moves, b_info, w_info).
+    Returns (b_moves, w_moves, b_info, w_info); a missing side is (None, {}).
     """
     with open(path, 'rb') as f:
         data = f.read()
+    return _parse_combined(data, path)
+
+
+def _parse_combined(
+    data: bytes, path: str = '<buffer>',
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Dict, Dict]:
+    if len(data) < 8:
+        raise ValueError(f"Combined KAB2 file too short: {path}")
 
     b_sz = struct.unpack_from('<I', data, 0)[0]
+    if 4 + b_sz + 4 > len(data):
+        raise ValueError(f"Combined KAB2 file truncated (B section): {path}")
     w_sz = struct.unpack_from('<I', data, 4 + b_sz)[0]
+    if 8 + b_sz + w_sz > len(data):
+        raise ValueError(f"Combined KAB2 file truncated (W section): {path}")
 
     b_moves = w_moves = None
     b_info  = w_info  = None

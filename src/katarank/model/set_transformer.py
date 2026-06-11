@@ -56,6 +56,25 @@ def pack_batch(sequences: List[torch.Tensor]) -> Tuple[torch.Tensor, List[int]]:
 
 # ─── Attention Components ─────────────────────────────────────────────────────
 
+def _block_diagonal_mask(X_lens: List[int], Y_lens: List[int],
+                         device: torch.device) -> torch.Tensor:
+    """
+    Additive (L, S) attention mask restricting each query to keys of the
+    same game in a packed batch: 0 = same game, -inf = different game.
+
+    Without this, packed games attend to each other and batch elements
+    are no longer independent (training/inference mismatch).
+    """
+    L, S = sum(X_lens), sum(Y_lens)
+    mask = torch.full((L, S), float('-inf'), device=device)
+    xo = yo = 0
+    for lx, ly in zip(X_lens, Y_lens):
+        mask[xo: xo + lx, yo: yo + ly] = 0.0
+        xo += lx
+        yo += ly
+    return mask
+
+
 class MultiHeadAttentionBlock(nn.Module):
     """
     Multi-head attention block with LayerNorm and residual connections.
@@ -94,8 +113,9 @@ class MultiHeadAttentionBlock(nn.Module):
         Args:
             X: (seq_X, dim) query tensor (packed batch)
             Y: (seq_Y, dim) key/value tensor (packed batch)
-            X_lens: batch structure for X
-            Y_lens: batch structure for Y
+            X_lens: per-game lengths for X; with Y_lens, attention is
+                    restricted to within-game pairs (block-diagonal mask)
+            Y_lens: per-game lengths for Y
 
         Returns:
             (seq_X, dim) output tensor
@@ -104,9 +124,30 @@ class MultiHeadAttentionBlock(nn.Module):
         X_3d = X.unsqueeze(1)   # (seq_X, 1, dim)
         Y_3d = Y.unsqueeze(1)   # (seq_Y, 1, dim)
 
-        # Multi-head attention
-        attn_out, _ = self.mha(X_3d, Y_3d, Y_3d)
-        attn_out = attn_out.squeeze(1)  # (seq_X, dim)
+        attn_mask = None
+        if X_lens is not None and Y_lens is not None and len(X_lens) > 1:
+            attn_mask = _block_diagonal_mask(X_lens, Y_lens, X.device)
+
+        if attn_mask is not None:
+            # Queries of a game whose key segment is empty have all -inf
+            # rows → softmax would produce NaN. Exclude them from mha and
+            # let the residual pass the original representation through.
+            all_masked = torch.isinf(attn_mask).all(dim=-1)
+            if all_masked.any():
+                valid = ~all_masked
+                attn_out = torch.zeros_like(X)
+                if valid.any():
+                    out_v, _ = self.mha(
+                        X[valid].unsqueeze(1), Y_3d, Y_3d,
+                        attn_mask=attn_mask[valid],
+                    )
+                    attn_out[valid] = out_v.squeeze(1)
+            else:
+                attn_out, _ = self.mha(X_3d, Y_3d, Y_3d, attn_mask=attn_mask)
+                attn_out = attn_out.squeeze(1)
+        else:
+            attn_out, _ = self.mha(X_3d, Y_3d, Y_3d)
+            attn_out = attn_out.squeeze(1)
 
         # Residual + LayerNorm
         H = self.norm0(X + attn_out)
@@ -154,9 +195,13 @@ class ISAB(nn.Module):
         # Flatten for MAB processing: (batch * M, dim)
         I_flat = I_batch.reshape(-1, I_batch.shape[-1])
 
+        # Per-game lengths for the inducing points (M each) — required so
+        # the block-diagonal mask keeps games independent within the batch.
+        I_lens = [self.num_inducing] * batch_size
+
         # MAB0: inducing points attend to input set
         # I acts as queries, X as keys/values
-        H = self.mab0(I_flat, X, None, xlens)  # (batch*M, dim)
+        H = self.mab0(I_flat, X, I_lens, xlens)  # (batch*M, dim)
 
         # Prepare H lens (each has same length = num_inducing)
         H_lens = [self.num_inducing] * batch_size
@@ -191,8 +236,9 @@ class PMA(nn.Module):
         # Flatten: (batch * num_seeds, dim)
         S_flat = S_batch.reshape(-1, S_batch.shape[-1])
 
-        # Seeds attend to the set
-        Z = self.mab(S_flat, X, None, xlens)  # (batch*num_seeds, dim)
+        # Seeds attend to the set, block-diagonal per game
+        S_lens = [self.num_seeds] * batch_size
+        Z = self.mab(S_flat, X, S_lens, xlens)  # (batch*num_seeds, dim)
 
         return Z
 
@@ -242,12 +288,7 @@ class SetDecoder(nn.Module):
 
     def forward(self, h: torch.Tensor, xlens: Optional[List[int]] = None) -> torch.Tensor:
         # Pool to fixed size: (batch * num_seeds, hidden_dim)
-        pooled = self.pma(h, xlens)
-
-        # If single seed, squeeze to (batch, hidden_dim)
-        if pooled.shape[0] == len(xlens) if xlens else 1:
-            return pooled
-        return pooled
+        return self.pma(h, xlens)
 
 
 # ─── Full Set Transformer Model ────────────────────────────────────────────────
@@ -355,7 +396,7 @@ class KataRankRatingModel(nn.Module):
 
     @staticmethod
     def load(path: str, device: str = 'cpu') -> 'KataRankRatingModel':
-        data = torch.load(path, map_location=device)
+        data = torch.load(path, map_location=device, weights_only=True)
         cfg = data['config']
         model = KataRankRatingModel(
             input_dim=cfg['input_dim'],

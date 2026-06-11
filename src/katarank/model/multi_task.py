@@ -46,8 +46,22 @@ class OrdinalLogisticHead(nn.Module):
         super().__init__()
         self.n_classes = n_classes
         self.linear = nn.Linear(input_dim, 1)
-        self.thresholds = nn.Parameter(
-            torch.linspace(-2.5, 2.5, n_classes - 1)
+        # Thresholds parameterised as base + cumsum(softplus(deltas)) so they
+        # stay strictly increasing during training. Unordered thresholds
+        # would yield negative class probabilities.
+        spacing = 5.0 / (n_classes - 2)   # matches linspace(-2.5, 2.5, n-1)
+        inv_softplus = torch.log(torch.expm1(torch.tensor(spacing)))
+        self.thresh_base   = nn.Parameter(torch.tensor(-2.5))
+        self.thresh_deltas = nn.Parameter(
+            torch.full((n_classes - 2,), inv_softplus.item())
+        )
+
+    @property
+    def thresholds(self) -> torch.Tensor:
+        """(n_classes - 1,) strictly increasing cut points."""
+        deltas = F.softplus(self.thresh_deltas)
+        return self.thresh_base + torch.cat(
+            [torch.zeros(1, device=deltas.device), deltas.cumsum(0)]
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -186,7 +200,7 @@ class KataRankModel(nn.Module):
 
     @staticmethod
     def load(path: str, device: str = 'cpu') -> 'KataRankModel':
-        data = torch.load(path, map_location=device)
+        data = torch.load(path, map_location=device, weights_only=True)
         assert data.get('type') == 'KataRankModel', \
             f"Expected KataRankModel, got {data.get('type')}"
         model = KataRankModel(**data['config'])
@@ -199,20 +213,24 @@ class KataRankModel(nn.Module):
     # ── convenience ──────────────────────────────────────────────────────────
 
     def predict_rank(self, x: torch.Tensor,
-                     xlens: Optional[List[int]] = None) -> Dict[str, torch.Tensor]:
-        """Inference helper: returns rank indices + continuous ratings."""
+                     xlens: Optional[List[int]] = None) -> Dict:
+        """Inference helper: returns rank indices + continuous ratings.
+
+        rank_name_b / rank_name_w are lists of strings, one per game.
+        """
         self.eval()
         with torch.no_grad():
             out = self.forward(x, xlens)
+        rank_b = out['rank_probs_b'].argmax(dim=-1)
+        rank_w = out['rank_probs_w'].argmax(dim=-1)
+        names = OrdinalLogisticHead.RANK_NAMES
         return {
             'b_rating':  out['b_rating'],
             'w_rating':  out['w_rating'],
-            'rank_b':    out['rank_probs_b'].argmax(dim=-1),
-            'rank_w':    out['rank_probs_w'].argmax(dim=-1),
-            'rank_name_b': OrdinalLogisticHead.RANK_NAMES[
-                out['rank_probs_b'].argmax(dim=-1).item()],
-            'rank_name_w': OrdinalLogisticHead.RANK_NAMES[
-                out['rank_probs_w'].argmax(dim=-1).item()],
+            'rank_b':    rank_b,
+            'rank_w':    rank_w,
+            'rank_name_b': [names[i] for i in rank_b.tolist()],
+            'rank_name_w': [names[i] for i in rank_w.tolist()],
         }
 
     def count_parameters(self) -> int:

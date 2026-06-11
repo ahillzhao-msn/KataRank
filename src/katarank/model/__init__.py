@@ -47,6 +47,8 @@ from katarank.model.losses import (
     RatingMSELoss,
 )
 
+from katarank.model.interpret import ActivationCapture
+
 __all__ = [
     # Set Transformer core
     'SetTransformer', 'SetEncoder', 'MultiHeadAttentionBlock',
@@ -63,4 +65,7 @@ __all__ = [
 
     # Losses
     'KataRankLoss', 'RankAnchorLoss', 'BradleyTerry', 'RatingMSELoss',
+
+    # Interpretability
+    'ActivationCapture',
 ]

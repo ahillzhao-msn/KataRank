@@ -6,7 +6,7 @@ High-level interface exposing KataGo analysis as a Python-native pipeline.
 Quick start:
 
     from katarank import KataGoEngine
-    from model import KataRankModel
+    from katarank.model import KataRankModel
     import torch
 
     engine = KataGoEngine(model='kata1-b18c384nbt.bin.gz')
@@ -23,22 +23,28 @@ Quick start:
         print(side, moves.shape, info['mean_log_prior'])
 """
 
-from katarank.engine import KataGoEngine, parse_kab2_buffer
+from katarank.engine import KataGoEngine, PersistentKataGoEngine, parse_kab2_buffer
 from katarank.workflow import TrainingWorkflow, InferenceWorkflow, RankResult
+from katarank.workflow import run_rank_files, run_rank_strings
+from katarank.workflow import result_to_output, engine_stats_outputs
 from katarank.schema import KAB2Sample, KAB2Batch, BaseKAB2Dataset, KAB2Output
+from katarank.schema import TrainingReport, save_training_report, load_training_report
 from katarank.schema import output_to_json, output_from_json, save_output, load_output
 from katarank.schema import save_outputs_batch, load_outputs_batch, rank_idx_to_str
 from katarank.data.datasets import KAB2Dataset, KAB2StreamDataset
 
 __all__ = [
     # Engine
-    'KataGoEngine', 'parse_kab2_buffer',
+    'KataGoEngine', 'PersistentKataGoEngine', 'parse_kab2_buffer',
     # Workflows
     'TrainingWorkflow', 'InferenceWorkflow',
+    'run_rank_files', 'run_rank_strings',
+    'result_to_output', 'engine_stats_outputs',
     # Data classes
     'KAB2Dataset', 'KAB2StreamDataset', 'KAB2Sample', 'KAB2Batch',
     # Schema
     'BaseKAB2Dataset', 'KAB2Output',
+    'TrainingReport', 'save_training_report', 'load_training_report',
     'output_to_json', 'output_from_json',
     'save_output', 'load_output',
     'save_outputs_batch', 'load_outputs_batch',
