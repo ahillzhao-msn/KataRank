@@ -52,7 +52,7 @@ move_vec (1, input_dim)  where input_dim = 10 + 2 × trunkCh
 
 | 区段 | 索引 | 内容 |
 |---|---|---|
-| `scalars` | `[0..9]` | winRate, scoreLead, complexity, policyEntropy, priorProb, winDelta, scoreDelta, **isWhite**, turnNumber, boardArea |
+| `scalars` | `[0..9]` | whiteWinProb, whiteLossProb, whiteNoResultProb, whiteScoreMean/50, shorttermScoreError/10, policyPrior, policyRank/361, **isWhite**, winDelta, scoreDelta/50（全部白方视角；详见 REVIEW_API_DESIGN.md §2.1，权威来源 batch_analysis.cpp `appendMoveRecord()`） |
 | `pick` | `[10 .. 10+trunkCh-1]` | KataGo trunk 在实际落子位置的激活（NCHW → `trunk[ch * HW + rowPos]`） |
 | `avgTrunk` | `[10+trunkCh .. input_dim-1]` | KataGo trunk 全盘空间均值（全局棋盘理解） |
 

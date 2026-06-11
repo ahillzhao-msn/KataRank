@@ -180,6 +180,38 @@ class KAB2Output(TypedDict):
     w_rank_probs: Optional[List[float]]
 
 
+class MoveRecord(TypedDict):
+    """Per-move review record derived from KAB2 move scalars.
+
+    All evaluative fields are in the MOVER's perspective (sign-flipped for
+    Black from KAB2's white-perspective raw scalars). Layout and conversion
+    rules: docs/REVIEW_API_DESIGN.md §2.
+
+    Move numbers assume strict B/W alternation with Black first (same
+    assumption as DualViewSetTransformer's causal masks); handicap games
+    are off by their handicap offset.
+    """
+    move_no:      int      # 1-based global move number
+    color:        str      # 'B' | 'W'
+    winrate:      float    # mover win probability at this position
+    score_lead:   float    # mover expected score lead (points)
+    score_stdev:  float    # shortterm score error — position complexity proxy
+    policy_prior: float    # policy prior of the move actually played
+    policy_rank:  int      # rank of played move in policy (0 = engine's top)
+    win_delta:    float    # mover winrate change caused by this move
+    score_delta:  float    # mover score change caused by this move (points)
+
+
+class ReviewOutput(KAB2Output):
+    """Game review output: KAB2Output (whole-game verdict) + per-move records.
+
+    Returned by /review/* endpoints. The 'moves' list is ascending by
+    move_no. Reserved for the future SAE review workflow: each move object
+    will additionally carry 'features' (see docs/SAE_DESIGN.md).
+    """
+    moves: List[MoveRecord]
+
+
 RANK_NAMES = [
     '20k','19k','18k','17k','16k','15k','14k','13k','12k','11k',
     '10k','9k','8k','7k','6k','5k','4k','3k','2k','1k',

@@ -27,7 +27,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from katarank.schema import KAB2Output, KAB2Sample, kab2_make_sample, kab2_collate
+from katarank.schema import (
+    KAB2Output, KAB2Sample, MoveRecord, ReviewOutput,
+    kab2_make_sample, kab2_collate,
+)
 
 
 # ─── Inference result type ────────────────────────────────────────────────────
@@ -384,6 +387,110 @@ def run_rank_strings(
         outputs = engine_stats_outputs(
             engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves)
         )
+    _attach_metadata_from_strings(outputs, strings)
+    return outputs
+
+
+# ─── Per-move review (docs/REVIEW_API_DESIGN.md) ─────────────────────────────
+
+def _move_records(moves_b: np.ndarray, moves_w: np.ndarray) -> List[MoveRecord]:
+    """Convert raw KAB2 move matrices into mover-perspective MoveRecords.
+
+    Scalar layout (white's perspective, batch_analysis.cpp appendMoveRecord):
+      [0] whiteWinProb [1] whiteLossProb [2] whiteNoResultProb
+      [3] whiteScoreMean/50 [4] shorttermScoreError/10
+      [5] policyPrior [6] policyRank/361 [7] isWhite
+      [8] winDelta [9] scoreDelta/50
+
+    Move numbers assume strict B/W alternation, Black first — the same
+    assumption DualViewSetTransformer uses for causal masking.
+    """
+    records: List[MoveRecord] = []
+    for stream, color in ((moves_b, 'B'), (moves_w, 'W')):
+        sign = 1.0 if color == 'W' else -1.0
+        for i, row in enumerate(stream):
+            records.append(MoveRecord(
+                move_no      = 2 * i + (1 if color == 'B' else 2),
+                color        = color,
+                winrate      = float(row[0] if color == 'W' else row[1]),
+                score_lead   = float(sign * row[3] * 50.0),
+                score_stdev  = float(row[4] * 10.0),
+                policy_prior = float(row[5]),
+                policy_rank  = int(round(float(row[6]) * 361.0)),
+                win_delta    = float(sign * row[8]),
+                score_delta  = float(sign * row[9] * 50.0),
+            ))
+    records.sort(key=lambda r: r['move_no'])
+    return records
+
+
+def _review_from_stream(
+    stream: Iterable,
+    inf_workflow: Optional[InferenceWorkflow],
+) -> List[ReviewOutput]:
+    """Build ReviewOutputs from one pass over a (side, moves, info) stream.
+
+    The whole-game verdict reuses the /rank logic: model inference when a
+    workflow is given, meanLogPrior heuristics otherwise — review never
+    costs a second katago run.
+    """
+    games: Dict[str, Dict] = {}
+    order: List[str] = []
+    for side, moves, info in stream:
+        gid = info.get('game_id') or f'game_{len(order):04d}'
+        if gid not in games:
+            games[gid] = {}
+            order.append(gid)
+        games[gid][side] = (moves, info)
+
+    outputs: List[ReviewOutput] = []
+    for gid in order:
+        entry = games[gid]
+        dim = next(m.shape[1] for m, _ in entry.values())
+        empty = np.zeros((0, dim), dtype=np.float32)
+        moves_b, info_b = entry.get('B', (empty, {}))
+        moves_w, info_w = entry.get('W', (empty, {}))
+        recs = _move_records(moves_b, moves_w)
+
+        if inf_workflow is not None:
+            rr = inf_workflow._infer_one(
+                torch.from_numpy(np.ascontiguousarray(moves_b)),
+                torch.from_numpy(np.ascontiguousarray(moves_w)),
+                {**info_b, 'game_id': gid}, info_w,
+            )
+            base = result_to_output(rr)
+        else:
+            def _frames():
+                for side_, (m, i) in entry.items():
+                    yield side_, m, {**i, 'game_id': gid}
+            base = engine_stats_outputs(_frames())[0]
+
+        outputs.append(ReviewOutput(**base, moves=recs))
+    return outputs
+
+
+def run_review_files(
+    engine, inf_workflow: Optional[InferenceWorkflow],
+    paths: List[str], mode: str = 'lite', min_moves: int = 10,
+) -> List[ReviewOutput]:
+    """Review SGF files: whole-game verdict + per-move records, one engine pass."""
+    outputs = _review_from_stream(
+        engine.stream_games(sgf_paths=paths, mode=mode, min_moves=min_moves),
+        inf_workflow,
+    )
+    _attach_metadata_from_files(outputs, paths)
+    return outputs
+
+
+def run_review_strings(
+    engine, inf_workflow: Optional[InferenceWorkflow],
+    strings: List[str], mode: str = 'lite', min_moves: int = 10,
+) -> List[ReviewOutput]:
+    """Review SGF strings: whole-game verdict + per-move records, one engine pass."""
+    outputs = _review_from_stream(
+        engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves),
+        inf_workflow,
+    )
     _attach_metadata_from_strings(outputs, strings)
     return outputs
 

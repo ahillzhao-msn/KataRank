@@ -18,7 +18,13 @@ POST /rank/string         rank from SGF content string
 POST /rank/file           rank from SGF file path
 POST /rank/batch          rank multiple SGFs (file paths or strings)
 POST /rank/directory      rank all .sgf files in a directory
+POST /review/string       rank + per-move records from SGF content string
+POST /review/file         rank + per-move records from SGF file path
+POST /review/batch        rank + per-move records for multiple SGFs
 GET  /health              liveness check
+
+Review endpoints return ReviewOutput = KAB2Output + 'moves' list
+(docs/REVIEW_API_DESIGN.md); request schemas are identical to /rank/*.
 """
 
 from __future__ import annotations
@@ -260,6 +266,65 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(e))
         return [dict(r) for r in results]
 
+    @app.post('/review/string')
+    def review_string(req: RankStringRequest):
+        """Rank + per-move review records from an SGF content string."""
+        try:
+            with engine_sem:
+                results = _run_review_strings(
+                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves
+                )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if not results:
+            return {'error': 'no output (too few moves?)'}
+        return dict(results[0])
+
+    @app.post('/review/file')
+    def review_file(req: RankFileRequest):
+        """Rank + per-move review records from an SGF file path."""
+        _check_path(req.path)
+        if not Path(req.path).exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {req.path}")
+        try:
+            with engine_sem:
+                results = _run_review_files(
+                    engine, inf_workflow, [req.path], req.mode, req.min_moves
+                )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if not results:
+            return {'error': 'no output'}
+        return dict(results[0])
+
+    @app.post('/review/batch')
+    def review_batch(req: RankBatchRequest):
+        """Rank + per-move review records for multiple SGFs."""
+        try:
+            if req.item_type == 'string':
+                with engine_sem:
+                    results = _run_review_strings(
+                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                    )
+            else:
+                for p in req.items:
+                    _check_path(p)
+                missing = [p for p in req.items if not Path(p).exists()]
+                if missing:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Files not found: {missing[:5]}"
+                    )
+                with engine_sem:
+                    results = _run_review_files(
+                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return [dict(r) for r in results]
+
     @app.post('/rank/directory')
     def rank_directory(req: RankDirectoryRequest):
         """Rank all .sgf files in a directory."""
@@ -287,6 +352,8 @@ def create_app(
 from katarank.workflow import (
     run_rank_files as _run_rank_files,
     run_rank_strings as _run_rank_strings,
+    run_review_files as _run_review_files,
+    run_review_strings as _run_review_strings,
 )
 
 

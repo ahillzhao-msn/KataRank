@@ -160,8 +160,10 @@ uv run katarank-server --model kata1.bin.gz --checkpoint nets/katarank/best.pt \
     --host 0.0.0.0 --port 8765 --sgf-root /data/sgf --max-concurrency 1
 ```
 
-Endpoints: `POST /rank/string | /rank/file | /rank/batch | /rank/directory`,
-`GET /health`. Returns `KAB2Output` JSON. `--sgf-root` restricts file-path
+Endpoints: `POST /rank/string | /rank/file | /rank/batch | /rank/directory`
+(returns `KAB2Output` JSON), `POST /review/string | /review/file | /review/batch`
+(returns `ReviewOutput` = `KAB2Output` + per-move records, see
+`docs/REVIEW_API_DESIGN.md`), `GET /health`. `--sgf-root` restricts file-path
 endpoints to a directory; `--max-concurrency` serializes katago runs.
 
 ### Persistent engine (daemon mode)

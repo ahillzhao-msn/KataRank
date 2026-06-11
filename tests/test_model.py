@@ -505,6 +505,112 @@ class TestLosses(unittest.TestCase):
         self.assertEqual(loss_fn.w_rank, 0.0)
 
 
+# ─── Per-move review (workflow.py / REVIEW_API_DESIGN.md) ────────────────────
+
+def make_review_streams(n_b: int = 3, n_w: int = 3, dim: int = 10):
+    """Synthesize B/W KAB2 move matrices with known scalar values."""
+    def rows(n, is_white):
+        m = np.zeros((n, dim), dtype=np.float32)
+        m[:, 0] = 0.60                  # whiteWinProb
+        m[:, 1] = 0.35                  # whiteLossProb
+        m[:, 3] = 2.0 / 50.0            # whiteScoreMean/50 → +2.0 pts for W
+        m[:, 4] = 1.5 / 10.0            # shorttermScoreError/10 → 1.5
+        m[:, 5] = 0.25                  # policyPrior
+        m[:, 6] = 5.0 / 361.0           # policyRank/361 → rank 5
+        m[:, 7] = 1.0 if is_white else 0.0
+        m[:, 8] = 0.10                  # winDelta (white perspective)
+        m[:, 9] = -1.0 / 50.0           # scoreDelta/50 → −1.0 pts for W
+        return m
+    return rows(n_b, False), rows(n_w, True)
+
+
+class TestMoveRecords(unittest.TestCase):
+
+    def test_alignment_and_perspective(self):
+        from katarank.workflow import _move_records
+        moves_b, moves_w = make_review_streams(3, 3)
+        recs = _move_records(moves_b, moves_w)
+
+        self.assertEqual([r['move_no'] for r in recs], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([r['color'] for r in recs],
+                         ['B', 'W', 'B', 'W', 'B', 'W'])
+
+        b, w = recs[0], recs[1]
+        # White-perspective raws: win 0.60 / loss 0.35, +2 pts, delta +0.1 / −1 pt
+        self.assertAlmostEqual(w['winrate'], 0.60, places=5)
+        self.assertAlmostEqual(b['winrate'], 0.35, places=5)   # whiteLossProb
+        self.assertAlmostEqual(w['score_lead'], 2.0, places=4)
+        self.assertAlmostEqual(b['score_lead'], -2.0, places=4)
+        self.assertAlmostEqual(w['win_delta'], 0.10, places=5)
+        self.assertAlmostEqual(b['win_delta'], -0.10, places=5)
+        self.assertAlmostEqual(w['score_delta'], -1.0, places=4)
+        self.assertAlmostEqual(b['score_delta'], 1.0, places=4)
+        # Perspective-free fields
+        for r in (b, w):
+            self.assertAlmostEqual(r['score_stdev'], 1.5, places=4)
+            self.assertAlmostEqual(r['policy_prior'], 0.25, places=5)
+            self.assertEqual(r['policy_rank'], 5)
+
+    def test_empty_stream(self):
+        from katarank.workflow import _move_records
+        moves_b, _ = make_review_streams(4, 0)
+        recs = _move_records(moves_b, np.zeros((0, 10), dtype=np.float32))
+        self.assertEqual(len(recs), 4)
+        self.assertTrue(all(r['color'] == 'B' for r in recs))
+
+
+class _StubEngine:
+    """Minimal engine stub: replays canned (side, moves, info) frames."""
+
+    def __init__(self, frames):
+        self.frames = frames
+
+    def stream_games(self, sgf_paths=None, sgf_strings=None,
+                     mode='lite', min_moves=10):
+        yield from self.frames
+
+
+class TestRunReview(unittest.TestCase):
+
+    def _frames(self, gid='g1'):
+        moves_b, moves_w = make_review_streams(3, 3)
+        info = {'game_id': gid, 'mean_log_prior': -2.5, 'human_rank_idx': 7,
+                'human_log_prior': -3.0}
+        return [('B', moves_b, dict(info)), ('W', moves_w, dict(info))]
+
+    def test_engine_stats_path(self):
+        from katarank.workflow import run_review_files
+        engine = _StubEngine(self._frames())
+        outs = run_review_files(engine, None, ['g1.sgf'])
+        self.assertEqual(len(outs), 1)
+        out = outs[0]
+        self.assertEqual(out['game_id'], 'g1')
+        self.assertEqual(len(out['moves']), 6)
+        self.assertAlmostEqual(out['b_rating'], -2.5, places=5)
+        self.assertEqual(out['b_rank'], 7)
+        self.assertEqual(out['metadata']['source'], 'engine')
+
+    def test_model_inference_path(self):
+        from katarank.workflow import run_review_files, InferenceWorkflow
+        model = KataRankModel(input_dim=10, hidden_dim=32, num_heads=2,
+                              num_inducing=4, encoder_depth=1, cross_depth=1)
+        engine = _StubEngine(self._frames())
+        wf = InferenceWorkflow(model, engine, device='cpu')
+        outs = run_review_files(engine, wf, ['g1.sgf'])
+        out = outs[0]
+        self.assertEqual(out['metadata']['source'], 'model')
+        self.assertEqual(len(out['moves']), 6)
+        self.assertIn('b_rating', out)
+        self.assertEqual(len(out['b_rank_probs']), 29)
+
+    def test_two_games_grouped(self):
+        from katarank.workflow import run_review_files
+        engine = _StubEngine(self._frames('g1') + self._frames('g2'))
+        outs = run_review_files(engine, None, ['g1.sgf', 'g2.sgf'])
+        self.assertEqual([o['game_id'] for o in outs], ['g1', 'g2'])
+        self.assertTrue(all(len(o['moves']) == 6 for o in outs))
+
+
 # ─── SAE interface (sae.py) ───────────────────────────────────────────────────
 
 class TestSparseAutoencoder(unittest.TestCase):
