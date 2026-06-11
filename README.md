@@ -11,7 +11,9 @@ raw SGF files to rank prediction.
 **Design principles**
 
 1. The core is the analysis model (`KataRankModel`); SAE-based
-   interpretability of its attention dimensions is on the roadmap.
+   interpretability of its attention dimensions is scaffolded
+   (`model/sae.py`, see `docs/SAE_DESIGN.md`) — SAE training lands
+   with the future ReviewWorkflow.
 2. KataGo access must be stable and efficient, stream-first.
 3. Input: SGF in three forms (directory / file list / content strings),
    routed to either training or inference.
@@ -232,7 +234,9 @@ katarank/
 │   │   ├── dual_view.py     DualViewSetTransformer (causal cross-attention)
 │   │   ├── multi_task.py    KataRankModel, OrdinalLogisticHead
 │   │   ├── losses.py        KataRankLoss (rating MSE + Bradley-Terry + rank anchor)
-│   │   └── set_transformer.py  ISAB/PMA primitives (block-diagonal batch masks)
+│   │   ├── set_transformer.py  ISAB/PMA primitives (block-diagonal batch masks)
+│   │   ├── interpret.py     ActivationCapture — forward-hook activation capture
+│   │   └── sae.py           SAE interface: FeatureExtractor, FeatureRegistry
 │   └── train/
 │       ├── training.py      katarank-train entry point + TrainingReport emission
 │       └── config_kata_native.yaml

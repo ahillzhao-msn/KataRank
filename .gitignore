@@ -6,6 +6,8 @@ featurecache/
 datasetviewer/
 games*.csv
 trickplay/
+_stress_test/
+scripts/stress_report.json
 
 # KataGo binary — download from ahillzhao-msn/KataGo/releases, place in src/katarank/bin/
 src/katarank/bin/katago.exe

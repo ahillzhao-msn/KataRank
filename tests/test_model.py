@@ -505,5 +505,154 @@ class TestLosses(unittest.TestCase):
         self.assertEqual(loss_fn.w_rank, 0.0)
 
 
+# ─── SAE interface (sae.py) ───────────────────────────────────────────────────
+
+class TestSparseAutoencoder(unittest.TestCase):
+
+    def test_forward_shapes(self):
+        from katarank.model import SparseAutoencoder
+        sae = SparseAutoencoder(d_model=32, expansion=4)
+        x = torch.randn(20, 32)
+        out = sae(x)
+        self.assertEqual(out['recon'].shape, (20, 32))
+        self.assertEqual(out['features'].shape, (20, 128))
+        self.assertTrue((out['features'] >= 0).all())
+
+    def test_topk_sparsity(self):
+        from katarank.model import SparseAutoencoder
+        sae = SparseAutoencoder(d_model=32, expansion=4, k=5)
+        f = sae.encode(torch.randn(20, 32))
+        l0 = (f > 0).sum(dim=-1)
+        self.assertTrue((l0 <= 5).all())
+
+    def test_loss_keys_and_modes(self):
+        from katarank.model import SparseAutoencoder
+        x = torch.randn(16, 32)
+        for k in (None, 5):
+            sae = SparseAutoencoder(d_model=32, expansion=4, k=k)
+            losses = sae.loss(x)
+            for key in ('total', 'mse', 'l1', 'l0'):
+                self.assertIn(key, losses)
+            losses['total'].backward()   # gradient flows
+
+    def test_save_load_roundtrip(self):
+        from katarank.model import SparseAutoencoder
+        sae = SparseAutoencoder(d_model=32, expansion=4, k=5)
+        x = torch.randn(8, 32)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'sae.pt')
+            sae.save(path)
+            sae2 = SparseAutoencoder.load(path)
+        self.assertEqual(sae2.get_config(), sae.get_config())
+        torch.testing.assert_close(sae2.encode(x), sae.encode(x))
+
+    def test_normalize_decoder(self):
+        from katarank.model import SparseAutoencoder
+        sae = SparseAutoencoder(d_model=32, expansion=4)
+        with torch.no_grad():
+            sae.W_dec.mul_(3.0)
+        sae.normalize_decoder_()
+        norms = sae.W_dec.norm(dim=-1)
+        torch.testing.assert_close(norms, torch.ones_like(norms))
+
+
+class TestFeatureExtractor(unittest.TestCase):
+
+    def _model(self):
+        return KataRankModel(input_dim=10, hidden_dim=32, num_heads=2,
+                             num_inducing=4, encoder_depth=1,
+                             cross_depth=1).eval()
+
+    def test_extract_alignment(self):
+        from katarank.model import SparseAutoencoder, FeatureExtractor
+        model = self._model()
+        sae = SparseAutoencoder(d_model=32, expansion=2, k=4)
+        fx = FeatureExtractor(model, sae_b=sae)
+        x = make_game_x(6, 6)
+        moves = fx.extract(x, top_k=4)
+
+        self.assertEqual(len(moves), 12)
+        self.assertEqual([m['move_no'] for m in moves], list(range(1, 13)))
+        for m in moves:
+            self.assertEqual(m['color'], 'B' if m['move_no'] % 2 == 1 else 'W')
+            self.assertLessEqual(len(m['feature_ids']), 4)
+            self.assertEqual(len(m['feature_ids']), len(m['activations']))
+            self.assertEqual(len(m['feature_ids']), len(m['labels']))
+
+    def test_extract_with_registry_labels(self):
+        from katarank.model import (
+            SparseAutoencoder, FeatureExtractor, FeatureRegistry,
+        )
+        model = self._model()
+        sae = SparseAutoencoder(d_model=32, expansion=2, k=4)
+        x = make_game_x(4, 4)
+        with tempfile.TemporaryDirectory() as d:
+            reg = FeatureRegistry(os.path.join(d, 'features.json'))
+            fx = FeatureExtractor(model, sae_b=sae, registry=reg)
+            moves = fx.extract(x, top_k=4)
+            fid = moves[0]['feature_ids'][0]
+            reg.label(fid, 'test-feature', author='unit')
+            moves2 = fx.extract(x, top_k=4)
+            labeled = [lbl for m in moves2 for i, lbl in zip(m['feature_ids'],
+                                                             m['labels'])
+                       if i == fid]
+            self.assertTrue(all(l == 'test-feature' for l in labeled))
+            self.assertGreater(len(labeled), 0)
+
+    def test_default_sites_resolution(self):
+        from katarank.model import default_cross_sites
+        site_b, site_w = default_cross_sites(self._model())
+        self.assertTrue(site_b.endswith('mab_bw'))
+        self.assertTrue(site_w.endswith('mab_wb'))
+
+
+class TestFeatureRegistry(unittest.TestCase):
+
+    def test_label_roundtrip_and_persistence(self):
+        from katarank.model import FeatureRegistry
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'features.json')
+            reg = FeatureRegistry(path)
+            reg.label(412, 'overplay', author='bzhao', notes='low-prior aggro')
+            self.assertEqual(reg.get(412)['label'], 'overplay')
+            self.assertIsNone(reg.get(999))
+            # reload from disk
+            reg2 = FeatureRegistry(path)
+            self.assertEqual(reg2.get(412)['label'], 'overplay')
+            self.assertEqual(len(reg2.all()), 1)
+
+
+class TestSAECorpus(unittest.TestCase):
+
+    def test_accumulate_capture(self):
+        from katarank.model import ActivationCapture, default_cross_sites
+        model = KataRankModel(input_dim=10, hidden_dim=32, num_heads=2,
+                              num_inducing=4, encoder_depth=1,
+                              cross_depth=1).eval()
+        site_b, _ = default_cross_sites(model)
+        x = make_game_x(5, 5)
+        with ActivationCapture(model, capture_attn=False,
+                               accumulate=True) as cap:
+            with torch.no_grad():
+                model(x, [10])
+                model(x, [10])
+        self.assertEqual(cap.activations[site_b].shape, (10, 32))
+
+    def test_collect_corpus(self):
+        from katarank.model import collect_sae_corpus, default_cross_sites
+        model = KataRankModel(input_dim=10, hidden_dim=32, num_heads=2,
+                              num_inducing=4, encoder_depth=1,
+                              cross_depth=1).eval()
+        site_b, site_w = default_cross_sites(model)
+        # Batch of two games: cross sites fire once per game — accumulate
+        # mode must collect both (5 + 7 black tokens).
+        g1 = make_game_x(5, 5, seed=1)
+        g2 = make_game_x(7, 7, seed=2)
+        batches = [(torch.cat([g1, g2]), [10, 14])]
+        corpus = collect_sae_corpus(model, batches, sites=[site_b, site_w])
+        self.assertEqual(corpus[site_b].shape, (12, 32))
+        self.assertEqual(corpus[site_w].shape, (12, 32))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

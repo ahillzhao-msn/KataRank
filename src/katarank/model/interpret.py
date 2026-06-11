@@ -44,6 +44,13 @@ class ActivationCapture:
                         need_weights, which is the default).
         detach:         Detach + move to CPU (recommended for SAE corpus
                         collection; set False to inspect gradients).
+        accumulate:     Concatenate repeated fires of the same hook along the
+                        token dimension instead of overwriting. Needed for
+                        corpus collection: CrossMAB calls each CausalMAB once
+                        per game in a batch, so overwrite mode keeps only the
+                        last game. Applies to block activations only —
+                        attention maps have per-game shapes and stay
+                        last-write-wins.
         block_types:    Override which module classes count as blocks.
     """
 
@@ -53,12 +60,14 @@ class ActivationCapture:
         capture_blocks: bool = True,
         capture_attn: bool = True,
         detach: bool = True,
+        accumulate: bool = False,
         block_types: Optional[Tuple[Type[nn.Module], ...]] = None,
     ):
         self.model = model
         self.capture_blocks = capture_blocks
         self.capture_attn = capture_attn
         self.detach = detach
+        self.accumulate = accumulate
         self.block_types = block_types or (MultiHeadAttentionBlock, CausalMAB)
 
         self.activations: Dict[str, torch.Tensor] = {}
@@ -91,8 +100,10 @@ class ActivationCapture:
 
     def _block_hook(self, name: str):
         def fn(_mod, _inputs, output):
-            t = output[0] if isinstance(output, tuple) else output
-            self.activations[name] = self._prep(t)
+            t = self._prep(output[0] if isinstance(output, tuple) else output)
+            if self.accumulate and name in self.activations:
+                t = torch.cat([self.activations[name], t], dim=0)
+            self.activations[name] = t
         return fn
 
     def _attn_hook(self, name: str):

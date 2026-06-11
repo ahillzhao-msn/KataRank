@@ -49,6 +49,15 @@ from katarank.model.losses import (
 
 from katarank.model.interpret import ActivationCapture
 
+from katarank.model.sae import (
+    SparseAutoencoder,
+    FeatureExtractor,
+    FeatureRegistry,
+    MoveFeature,
+    collect_sae_corpus,
+    default_cross_sites,
+)
+
 __all__ = [
     # Set Transformer core
     'SetTransformer', 'SetEncoder', 'MultiHeadAttentionBlock',
@@ -68,4 +77,6 @@ __all__ = [
 
     # Interpretability
     'ActivationCapture',
+    'SparseAutoencoder', 'FeatureExtractor', 'FeatureRegistry',
+    'MoveFeature', 'collect_sae_corpus', 'default_cross_sites',
 ]
