@@ -243,7 +243,6 @@ class KataGoEngine:
         mode: str = 'full',
         min_moves: int = 10,
         max_games: int = 0,
-        compress: bool = True,
     ) -> Generator[Tuple[str, np.ndarray, Dict], None, None]:
         """
         Run batch_analysis in stream mode; yield one record per player per game.
@@ -267,8 +266,6 @@ class KataGoEngine:
         ]
         if mode == 'lite':
             cmd.append('-no-trunk')
-        if not compress:
-            cmd.append('-no-compress')
         if max_games > 0:
             cmd += ['-max-games', str(max_games)]
 
@@ -317,7 +314,6 @@ class KataGoEngine:
         mode: str = 'full',
         min_moves: int = 10,
         max_games: int = 0,
-        compress: bool = True,
     ) -> int:
         """
         Run batch_analysis writing _B.npz/_W.npz files to output_dir.
@@ -343,8 +339,6 @@ class KataGoEngine:
         ]
         if mode == 'lite':
             cmd.append('-no-trunk')
-        if not compress:
-            cmd.append('-no-compress')
         if max_games > 0:
             cmd += ['-max-games', str(max_games)]
 

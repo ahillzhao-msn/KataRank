@@ -58,23 +58,37 @@ KAB2_SCALAR_WIN_DELTA  = 8
 
 
 def read_kab2(path: str) -> Tuple[np.ndarray, Dict]:
-    """
-    Read a KAB2 file from disk.
+    """Read a KAB2 file (single or combined) and return (moves, info).
 
-    Returns:
-        moves:  (numMoves, moveDim) float32 array
-                moveDim = scalarDim + 2*trunkDim
-        info:   dict with header metadata
+    For combined .npz files (B+W in one file), returns Black player data.
+    Use read_kab2_combined() to get both players.
     """
     with open(path, 'rb') as f:
         raw = f.read()
+    # Auto-detect: combined format starts with uint32 size, then KAB2 magic
+    if len(raw) > 8 and raw[4:8] == _MAGIC:
+        b_sz = struct.unpack_from('<I', raw, 0)[0]
+        if b_sz > 0:
+            return _parse_kab2(raw[4: 4 + b_sz])
+    # Old single format
     return _parse_kab2(raw)
 
 
 def probe_kab2_dim(path: str) -> int:
-    """Read only the 96-byte header and return moveDim without loading move data."""
+    """Read header and return moveDim without loading move data.
+
+    Handles both old single and new combined .npz formats.
+    """
     with open(path, 'rb') as f:
-        header = f.read(_HEADER_SIZE)
+        header = f.read(_HEADER_SIZE + 8)  # enough for combined header too
+    # Combined format: bytes 4-7 hold KAB2 magic
+    if len(header) > 8 and header[4:8] == _MAGIC:
+        b_sz = struct.unpack_from('<I', header, 0)[0]
+        if b_sz >= _HEADER_SIZE:
+            scalar_dim = struct.unpack_from('<i', header, 12)[0]
+            trunk_dim  = struct.unpack_from('<i', header, 16)[0]
+            return scalar_dim + 2 * trunk_dim
+    # Old single format: header starts at byte 0
     if header[:4] != _MAGIC:
         raise ValueError(f"Not a KAB2 file: {path}")
     scalar_dim = struct.unpack_from('<i', header, 8)[0]

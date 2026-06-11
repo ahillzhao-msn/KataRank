@@ -1,0 +1,2 @@
+file,black,white,black_elo,white_elo,total_moves,black_moves,white_moves,set,B_acc1,B_acc3,B_logPrior,B_winRate,B_scoreLead,B_complexity,B_scoreVar,B_drop,B_humanRank,B_humanLogPrior,W_acc1,W_acc3,W_logPrior,W_winRate,W_scoreLead,W_complexity,W_scoreVar,W_drop,W_humanRank,W_humanLogPrior
+test,unknown,unknown,1500,1500,147,74,73,T,0.108108,0.324324,-5.22118,0.886894,45.8314,1.69232,1156.19,0.0327511,rank_20k,0,0.109589,0.191781,-6.90426,0.147437,-39.7899,1.54695,1046.56,0.041716,rank_20k,0
