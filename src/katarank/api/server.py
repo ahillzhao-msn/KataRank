@@ -108,15 +108,10 @@ def create_app(
     """
     _require_fastapi()
     import threading
+    from contextlib import asynccontextmanager
 
     from katarank.engine import KataGoEngine, PersistentKataGoEngine
     from katarank.workflow import InferenceWorkflow
-
-    app = FastAPI(
-        title='KataRank API',
-        description='Go player rank assessment via KataGo neural analysis',
-        version='0.2.0',
-    )
 
     # ── Shared state ──────────────────────────────────────────────────────────
 
@@ -129,7 +124,11 @@ def create_app(
             mode        = engine_mode,
         )
         engine.start()   # pay the model load once, at server boot
-        app.add_event_handler('shutdown', engine.close)
+
+        @asynccontextmanager
+        async def _lifespan(app):
+            yield
+            engine.close()
     else:
         engine = KataGoEngine(
             model       = katago_model,
@@ -137,6 +136,14 @@ def create_app(
             human_model = human_model,
             katago_bin  = katago_bin,
         )
+        _lifespan = None
+
+    app = FastAPI(
+        title='KataRank API',
+        description='Go player rank assessment via KataGo neural analysis',
+        version='0.2.0',
+        lifespan=_lifespan,
+    )
 
     # Load rank model if checkpoint given
     inf_workflow: Optional[InferenceWorkflow] = None
