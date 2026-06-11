@@ -81,10 +81,19 @@ katago/katago.exe batch_analysis \
     -no-trunk
 
 # Stream mode — pipe KAB2 directly to Python, no disk files
-katago/katago.exe batch_analysis \
+katago.exe batch_analysis \
     -model kata1-b18c384nbt.bin.gz \
     -list games.csv \
     -stream
+
+# Lite mode — scalars only (10 dims), 100x faster, no trunk
+katago.exe batch_analysis \
+    -model kata1-b18c384nbt.bin.gz \
+    -list games.csv \
+    -stream -no-trunk
+
+# Stream mode protocol: [1 byte side][4 bytes size][KAB2 payload] per player,
+# terminated by 0x00. Progress goes to stderr, binary data to stdout.
 ```
 
 `games.csv` format: `File,Player Black,Player White,BlackRating,WhiteRating,Set`  
