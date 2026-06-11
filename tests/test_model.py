@@ -719,7 +719,7 @@ class TestFeatureRegistry(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, 'features.json')
             reg = FeatureRegistry(path)
-            reg.label(412, 'overplay', author='bzhao', notes='low-prior aggro')
+            reg.label(412, 'overplay', author='reviewer', notes='low-prior aggro')
             self.assertEqual(reg.get(412)['label'], 'overplay')
             self.assertIsNone(reg.get(999))
             # reload from disk

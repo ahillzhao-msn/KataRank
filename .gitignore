@@ -143,3 +143,8 @@ cython_debug/
 
 # PyCharm
 #.idea/
+
+# Tool droppings / local-only
+.hermes/
+.gitconfig
+.env

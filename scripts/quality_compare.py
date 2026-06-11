@@ -13,11 +13,11 @@ import os, sys, random, time, json, subprocess
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-KATAGO = r'C:\Users\bzhao\katago-fork\cpp\katago.exe'
-CONFIG = r'C:\Users\bzhao\katago-fork\cpp\analysis_config_opt.cfg'
-MODEL  = r'C:\Users\bzhao\.katago\default_model.bin.gz'
-HUMAN  = r'C:\Users\bzhao\.katago\b18c384nbt-humanv0.bin.gz'
-SGF_DIR = os.path.expanduser('~/go-analyzer/training')
+KATAGO = os.environ.get('KATAGO_BIN', 'katago')
+CONFIG = os.environ.get('KATAGO_CONFIG', '')
+MODEL  = os.environ.get('KATAGO_MODEL', os.path.expanduser('~/.katago/default_model.bin.gz'))
+HUMAN  = os.environ.get('KATAGO_HUMAN_MODEL', os.path.expanduser('~/.katago/b18c384nbt-humanv0.bin.gz'))
+SGF_DIR = os.environ.get('KATARANK_SGF_CORPUS', os.path.expanduser('~/sgf-corpus'))
 WORK   = os.path.expanduser('~/katarank/_stress_test')
 
 import torch

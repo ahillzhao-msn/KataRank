@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import shutil
 import sys
@@ -37,10 +38,10 @@ from katarank.schema import kab2_make_sample, kab2_collate
 from katarank.workflow import TrainingWorkflow, InferenceWorkflow, run_rank_files
 from katarank.model import KataRankModel, KataRankLoss
 
-KATAGO_BIN  = r'C:\Users\bzhao\katago-fork\cpp\katago.exe'
-MODEL       = r'C:\Users\bzhao\katago\opencl\default_model.bin.gz'
-HUMAN_MODEL = r'C:\Users\bzhao\katago\b18c384nbt-humanv0.bin.gz'
-SGF_ROOT    = Path(r'C:\Users\bzhao\go-analyzer\training')
+KATAGO_BIN  = os.environ.get('KATAGO_BIN', 'katago')
+MODEL       = os.environ.get('KATAGO_MODEL', os.path.expanduser('~/.katago/default_model.bin.gz'))
+HUMAN_MODEL = os.environ.get('KATAGO_HUMAN_MODEL', os.path.expanduser('~/.katago/b18c384nbt-humanv0.bin.gz'))
+SGF_ROOT    = Path(os.environ.get('KATARANK_SGF_CORPUS', os.path.expanduser('~/sgf-corpus')))
 
 MAX_MOVES = 400   # clip per player, matches KAB2Dataset default
 

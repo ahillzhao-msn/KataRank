@@ -103,11 +103,11 @@ def analyze_npz(npz_path, label=''):
 def main():
     parser = argparse.ArgumentParser(description='KataRank Pipeline Benchmark')
     parser.add_argument('--sgf-dir',
-                        default=r'C:\Users\bzhao\go-analyzer\training')
+                        default=os.environ.get('KATARANK_SGF_CORPUS', os.path.expanduser('~/sgf-corpus')))
     parser.add_argument('--katago',
-                        default=r'C:\Users\bzhao\katago-fork\cpp\katago.exe')
+                        default=os.environ.get('KATAGO_BIN', 'katago'))
     parser.add_argument('--model',
-                        default=r'C:\Users\bzhao\katago\opencl\default_model.bin.gz')
+                        default=os.environ.get('KATAGO_MODEL', os.path.expanduser('~/.katago/default_model.bin.gz')))
     parser.add_argument('--human-model', default=None)
     parser.add_argument('--games', type=int, default=50,
                         help='SGFs per rank level')
@@ -116,8 +116,8 @@ def main():
     args = parser.parse_args()
 
     if not args.human_model:
-        for p in [r'C:\Users\bzhao\katago\human\human_model.bin.gz',
-                  r'C:\Users\bzhao\katago\opencl\human_model.bin.gz']:
+        for p in [os.environ.get('KATAGO_HUMAN_MODEL', ''),
+                  os.path.expanduser('~/.katago/b18c384nbt-humanv0.bin.gz')]:
             if os.path.exists(p):
                 args.human_model = p
                 break

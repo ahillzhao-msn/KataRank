@@ -193,7 +193,7 @@ forward 中同一 hook 触发多次。覆盖语义下 batch>1 时 cross site 只
 ### 4.4 Registry JSON 格式
 
 ```json
-{ "412": {"label": "overplay", "author": "bzhao",
+{ "412": {"label": "overplay", "author": "reviewer",
            "notes": "fires on low-prior aggressive moves", "updated": "2026-06-11"} }
 ```
 
