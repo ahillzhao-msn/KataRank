@@ -88,10 +88,12 @@ class AnalysisDaemon:
         katago_bin: str,
         model: str,
         config: Optional[str] = None,
+        human_model: Optional[str] = None,
     ) -> None:
-        self._bin    = katago_bin
-        self._model  = model
-        self._config = config
+        self._bin         = katago_bin
+        self._model       = model
+        self._config      = config
+        self._human_model = human_model
 
         self._proc: Optional[subprocess.Popen] = None
         self._write_lock   = threading.Lock()   # serialise stdin writes
@@ -114,6 +116,10 @@ class AnalysisDaemon:
 
         cmd = [self._bin, 'analysis',
                '-model', self._model, '-config', self._config]
+        if self._human_model:
+            # enables per-query overrideSettings.humanSLProfile (rank-simulated
+            # play for what-if exploration)
+            cmd += ['-human-model', self._human_model]
 
         self._proc = subprocess.Popen(
             cmd,
@@ -315,21 +321,30 @@ class AnalysisDaemon:
         sgf_content: str,
         turn: int,
         *,
+        extra_moves: Optional[List[List[str]]] = None,
+        human_profile: Optional[str] = None,
         max_visits: int = 50,
         include_policy: bool = True,
         timeout: float = 60.0,
     ) -> Optional[dict]:
-        """Top moves and policy for a single turn (future: what-if branches).
+        """Top moves and policy for a position (what-if branch analysis).
 
         Args:
             sgf_content:    Raw SGF string.
-            turn:           0-based turn number to analyse.
+            turn:           0-based turn number — the branch point.
+            extra_moves:    Trial moves appended after `turn`, e.g.
+                            [['B', 'Q16'], ['W', 'D4']]. The analysed
+                            position is the SGF truncated at `turn` plus
+                            these moves.
+            human_profile:  HumanSL profile (e.g. 'rank_5d') to simulate a
+                            player of that strength. Requires the daemon to
+                            be started with a human model; ignored otherwise.
             max_visits:     NN visits (higher = stronger, slower).
             include_policy: Include per-position policy prior.
             timeout:        Seconds to wait for the single response.
 
         Returns:
-            Raw KataGo analysis JSON object for that turn, or None on error.
+            Raw KataGo analysis JSON object for that position, or None on error.
         """
         from katarank._sgf_parse import extract_moves_for_analysis
 
@@ -339,16 +354,19 @@ class AnalysisDaemon:
         if turn < 0 or turn > len(params['moves']):
             return None
 
+        moves = list(params['moves'][:turn]) + list(extra_moves or [])
         query = {
             'initialStones':  [],
-            'moves':          params['moves'],
+            'moves':          moves,
             'rules':          params['rules'],
             'komi':           params['komi'],
             'boardXSize':     params['board_size'],
             'boardYSize':     params['board_size'],
             'maxVisits':      max_visits,
             'includePolicy':  include_policy,
-            'analyzeTurns':   [turn],
+            'analyzeTurns':   [len(moves)],
         }
+        if human_profile and self._human_model:
+            query['overrideSettings'] = {'humanSLProfile': human_profile}
         responses = self._send(query, expected=1, timeout=timeout)
         return responses[0] if responses else None

@@ -81,6 +81,13 @@ if _FASTAPI_AVAILABLE:
         sgf: str
         max_visits: int = 1
 
+    class VariationStringRequest(BaseModel):
+        sgf: str
+        turn: int                                   # 0-based branch point
+        extra_moves: List[List[str]] = []           # [['B','Q16'], ...]
+        max_visits: int = 24
+        human_profile: Optional[str] = None         # e.g. 'rank_5d'
+
     # ── Response schemas ──────────────────────────────────────────────────
     # Pydantic mirrors of schema.py's TypedDicts (KAB2Output / MoveRecord /
     # ReviewOutput). Their purpose is the OpenAPI contract: consumers like
@@ -179,9 +186,10 @@ def create_app(
     # Online analysis daemon (JSON protocol) — separate process to avoid
     # blocking interactive queries behind long batch jobs on the GPU.
     analysis_daemon = AnalysisDaemon(
-        katago_bin = engine.katago_bin,
-        model      = katago_model,
-        config     = katago_config,
+        katago_bin  = engine.katago_bin,
+        model       = katago_model,
+        config      = katago_config,
+        human_model = human_model,
     )
     analysis_daemon.start()
 
@@ -472,6 +480,41 @@ def create_app(
             if own is not None
         ]
         return {'moves': moves}
+
+    @app.post('/variation/string')
+    def variation_string(req: VariationStringRequest):
+        """Top candidate moves for a what-if branch (trial-play research).
+
+        Analyses the SGF truncated at `turn` plus `extra_moves`. With
+        `human_profile` set (and the server started with --human-model),
+        candidates reflect a player of that rank instead of full-strength
+        KataGo. Routes to the persistent AnalysisDaemon; never persisted.
+        """
+        try:
+            resp = analysis_daemon.query_variation(
+                req.sgf, req.turn,
+                extra_moves   = req.extra_moves,
+                human_profile = req.human_profile,
+                max_visits    = req.max_visits,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        if resp is None:
+            raise HTTPException(status_code=422,
+                                detail='unparseable SGF or turn out of range')
+
+        infos = resp.get('moveInfos', [])
+        root  = resp.get('rootInfo', {})
+        return {
+            'moves': [
+                {'move': mi.get('move'), 'winrate': mi.get('winrate'),
+                 'score_lead': mi.get('scoreLead'), 'visits': mi.get('visits'),
+                 'order': mi.get('order'), 'prior': mi.get('prior')}
+                for mi in infos
+            ],
+            'root': {'winrate': root.get('winrate'),
+                     'score_lead': root.get('scoreLead')},
+        }
 
     return app
 
