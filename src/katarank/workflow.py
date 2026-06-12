@@ -485,13 +485,32 @@ def run_review_files(
 def run_review_strings(
     engine, inf_workflow: Optional[InferenceWorkflow],
     strings: List[str], mode: str = 'lite', min_moves: int = 10,
+    include_ownership: bool = False,
+    analysis_daemon=None,
 ) -> List[ReviewOutput]:
-    """Review SGF strings: whole-game verdict + per-move records, one engine pass."""
+    """Review SGF strings: whole-game verdict + per-move records, one engine pass.
+
+    When include_ownership=True, fetches ownership (361 floats per position)
+    and attaches it to MoveRecord.ownership. Uses analysis_daemon when
+    provided (persistent process, no model reload); otherwise falls back to a
+    one-shot subprocess. Stream/online mode only — never persisted.
+    """
     outputs = _review_from_stream(
         engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves),
         inf_workflow,
     )
     _attach_metadata_from_strings(outputs, strings)
+
+    if include_ownership:
+        for out, sgf in zip(outputs, strings):
+            try:
+                ownership_map = engine.fetch_ownership(sgf, daemon=analysis_daemon)
+            except Exception:
+                ownership_map = {}
+            for rec in out['moves']:
+                # move_no is 1-based; turn N = state after N moves played
+                rec['ownership'] = ownership_map.get(rec['move_no'])
+
     return outputs
 
 

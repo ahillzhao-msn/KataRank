@@ -74,6 +74,10 @@ if _FASTAPI_AVAILABLE:
         mode: str = 'lite'
         min_moves: int = 10
 
+    class OwnershipStringRequest(BaseModel):
+        sgf: str
+        max_visits: int = 1
+
     # ── Response schemas ──────────────────────────────────────────────────
     # Pydantic mirrors of schema.py's TypedDicts (KAB2Output / MoveRecord /
     # ReviewOutput). Their purpose is the OpenAPI contract: consumers like
@@ -103,6 +107,7 @@ if _FASTAPI_AVAILABLE:
         policy_rank:  int                      # 0 = engine's top choice
         win_delta:    float
         score_delta:  float
+        ownership:    Optional[List[float]] = None  # 361 floats, stream mode only
 
     class ReviewOutputModel(KAB2OutputModel):
         """Verdict + per-move records (schema.ReviewOutput)."""
@@ -144,11 +149,13 @@ def create_app(
     import threading
     from contextlib import asynccontextmanager
 
+    from katarank.analysis_daemon import AnalysisDaemon
     from katarank.engine import KataGoEngine, PersistentKataGoEngine
     from katarank.workflow import InferenceWorkflow
 
     # ── Shared state ──────────────────────────────────────────────────────────
 
+    # Batch analysis daemon (KAB2 protocol) — one GPU job at a time via engine_sem
     if persistent:
         engine = PersistentKataGoEngine(
             model       = katago_model,
@@ -158,11 +165,6 @@ def create_app(
             mode        = engine_mode,
         )
         engine.start()   # pay the model load once, at server boot
-
-        @asynccontextmanager
-        async def _lifespan(app):
-            yield
-            engine.close()
     else:
         engine = KataGoEngine(
             model       = katago_model,
@@ -170,7 +172,22 @@ def create_app(
             human_model = human_model,
             katago_bin  = katago_bin,
         )
-        _lifespan = None
+
+    # Online analysis daemon (JSON protocol) — separate process to avoid
+    # blocking interactive queries behind long batch jobs on the GPU.
+    analysis_daemon = AnalysisDaemon(
+        katago_bin = engine.katago_bin,
+        model      = katago_model,
+        config     = katago_config,
+    )
+    analysis_daemon.start()
+
+    @asynccontextmanager
+    async def _lifespan(app):
+        yield
+        analysis_daemon.stop()
+        if persistent:
+            engine.close()
 
     app = FastAPI(
         title='KataRank API',
@@ -210,14 +227,17 @@ def create_app(
 
     @app.get('/health')
     async def health():
-        alive = True
-        if persistent:
-            alive = engine._proc is not None and engine._proc.poll() is None
+        batch_alive = (not persistent) or (
+            engine._proc is not None and engine._proc.poll() is None
+        )
+        analysis_alive = analysis_daemon.is_alive
+        ok = batch_alive and analysis_alive
         return {
-            'status': 'ok' if alive else 'engine_down',
-            'model_loaded': inf_workflow is not None,
-            'engine_persistent': persistent,
-            'engine_ready': alive,
+            'status':              'ok' if ok else 'degraded',
+            'model_loaded':        inf_workflow is not None,
+            'engine_persistent':   persistent,
+            'engine_ready':        batch_alive,
+            'analysis_daemon_ready': analysis_alive,
         }
 
     @app.post('/engine/reset')
@@ -311,11 +331,17 @@ def create_app(
 
     @app.post('/review/string', response_model=ReviewOutputModel)
     def review_string(req: RankStringRequest):
-        """Rank + per-move review records from an SGF content string."""
+        """Rank + per-move review records from an SGF content string.
+
+        Ownership (361 floats) is attached via the persistent AnalysisDaemon,
+        never persisted — stream/online mode only.
+        """
         try:
             with engine_sem:
                 results = _run_review_strings(
-                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves
+                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
+                    include_ownership=True,
+                    analysis_daemon=analysis_daemon,
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -389,6 +415,31 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         return [dict(r) for r in results]
+
+    @app.post('/ownership/string')
+    def ownership_string(req: OwnershipStringRequest):
+        """Per-position ownership for each move in an SGF string.
+
+        Routes to the persistent AnalysisDaemon (JSON protocol, no model
+        reload) rather than the batch_analysis engine. Results are never
+        persisted — stream/online mode only.
+
+        Response: {"moves": [{"move_no": int, "ownership": [361 floats]}, ...]}
+        move_no is 1-based (matches MoveRecord.move_no convention).
+        """
+        try:
+            ownership_map = analysis_daemon.query_ownership(
+                req.sgf, max_visits=req.max_visits
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        moves = [
+            {'move_no': turn, 'ownership': own}
+            for turn, own in sorted(ownership_map.items())
+            if own is not None
+        ]
+        return {'moves': moves}
 
     return app
 

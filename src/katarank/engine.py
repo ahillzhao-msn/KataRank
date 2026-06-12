@@ -50,7 +50,10 @@ import threading
 import zlib
 from collections import deque
 from pathlib import Path
-from typing import Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Generator, Iterable, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from katarank.analysis_daemon import AnalysisDaemon
 
 import numpy as np
 
@@ -352,6 +355,91 @@ class KataGoEngine:
             moves, info = parse_kab2_buffer(data)
             info['game_id'] = game_id
             yield side, moves, info
+
+    # ── Ownership extraction (analysis JSON mode, stream path only) ──────────
+
+    def fetch_ownership(
+        self,
+        sgf_content: str,
+        *,
+        max_visits: int = 1,
+        timeout: int = 120,
+        daemon: Optional['AnalysisDaemon'] = None,
+    ) -> Dict[int, List[float]]:
+        """Return per-position ownership for every turn.
+
+        Prefers `daemon` (persistent AnalysisDaemon — no model reload) when
+        provided. Falls back to a one-shot subprocess when daemon is absent.
+
+        This is separate from batch_analysis (KAB2 format): KAB2 does not
+        include ownership data. Only called in stream/online mode — never
+        persisted.
+
+        Args:
+            sgf_content: Raw SGF string for a single game.
+            max_visits:  NN visits per position (1 = single forward pass).
+            timeout:     Timeout in seconds (subprocess or daemon query).
+            daemon:      Optional persistent AnalysisDaemon; use when available.
+
+        Returns:
+            Dict of turn_number (0-based) → [361 floats].
+            +1.0 = Black territory, -1.0 = White territory.
+        """
+        if daemon is not None and daemon.is_alive:
+            return daemon.query_ownership(
+                sgf_content, max_visits=max_visits, timeout=float(timeout)
+            )
+
+        # Fallback: one-shot subprocess (slow path — spawns and loads model)
+        import json as _json
+        from katarank._sgf_parse import extract_moves_for_analysis
+
+        params = extract_moves_for_analysis(sgf_content)
+        if params is None:
+            return {}
+
+        n_turns = len(params['moves']) + 1
+        query = {
+            'id': 'ownership-oneshot',
+            'initialStones': [],
+            'moves':         params['moves'],
+            'rules':         params['rules'],
+            'komi':          params['komi'],
+            'boardXSize':    params['board_size'],
+            'boardYSize':    params['board_size'],
+            'maxVisits':     max_visits,
+            'includeOwnership': True,
+            'analyzeTurns':  list(range(n_turns)),
+        }
+
+        cmd = [self.katago_bin, 'analysis', '-model', self.model]
+        if self.config:
+            cmd += ['-config', self.config]
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, _ = proc.communicate(
+                input=(_json.dumps(query) + '\n').encode('utf-8'),
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return {}
+
+        result: Dict[int, List[float]] = {}
+        for line in stdout.decode('utf-8', errors='replace').splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+                if 'ownership' in obj and 'turnNumber' in obj:
+                    result[obj['turnNumber']] = obj['ownership']
+            except _json.JSONDecodeError:
+                pass
+        return result
 
     # ── File mode ─────────────────────────────────────────────────────────────
 

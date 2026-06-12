@@ -11,6 +11,10 @@ Defines the canonical data contract for the project.
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, TypedDict, Union
+try:
+    from typing import NotRequired
+except ImportError:
+    from typing_extensions import NotRequired
 
 import torch
 
@@ -200,6 +204,7 @@ class MoveRecord(TypedDict):
     policy_rank:  int      # rank of played move in policy (0 = engine's top)
     win_delta:    float    # mover winrate change caused by this move
     score_delta:  float    # mover score change caused by this move (points)
+    ownership:    NotRequired[Optional[List[float]]]  # 361 floats, stream mode only
 
 
 class ReviewOutput(KAB2Output):
