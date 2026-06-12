@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.2.1)'
+        required: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests
+        run: uv run pytest tests/ -v --tb=short
+
+      - name: Build wheel and sdist
+        run: uv build
+
+      - name: Generate pinned requirements (wheel users)
+        run: |
+          uv export --extra api --no-hashes --no-dev --no-emit-project \
+            --output-file dist/requirements-api.txt
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: KataRank ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/requirements-api.txt
+          body: |
+            ## Install
+
+            **From wheel (recommended):**
+            ```bash
+            pip install katarank-*.whl
+            # With API server:
+            pip install 'katarank[api] @ katarank-*.whl'
+            ```
+
+            **Pin exact versions after wheel install:**
+            ```bash
+            pip install -r requirements-api.txt
+            ```
+
+            **Requires:** [KataGo custom binary](https://github.com/ahillzhao-msn/KataGo/releases) + KataGo model weights.
+            See the [README](https://github.com/ahillzhao-msn/katarank#readme) for full setup.

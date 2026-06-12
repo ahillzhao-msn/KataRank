@@ -94,13 +94,15 @@ if ($NoPersistent) { $Args += "--no-persistent" }
 
 $AppPath = Join-Path $ProjectRoot ".venv\Scripts\katarank-server.exe"
 if (-not (Test-Path $AppPath)) {
-    # Fallback: katarank-server might be a .exe shim or a .py script
-    $AppPath = Join-Path $ProjectRoot ".venv\Scripts\katarank-server.exe"
-    if (-not (Test-Path $AppPath)) {
-        Write-Warning "katarank-server.exe not found; using python -m katarank.api.server"
-        $AppPath = $VenvPython
-        $Args = @("-m", "katarank.api.server") + $Args
-    }
+    Write-Warning "katarank-server.exe not found; using python -m katarank.api.server"
+    $AppPath = $VenvPython
+    $Args = @("-m", "katarank.api.server") + $Args
+}
+
+# Ensure log directory exists before NSSM tries to write to it
+$LogDir = Join-Path $ProjectRoot "logs"
+if (-not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir | Out-Null
 }
 
 & $Nssm install KataRank $AppPath $Args
