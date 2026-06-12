@@ -45,6 +45,7 @@ Typical usage:
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import zlib
@@ -56,6 +57,8 @@ if TYPE_CHECKING:
     from katarank.analysis_daemon import AnalysisDaemon
 
 import numpy as np
+
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 
 # ─── KAB2 constants ──────────────────────────────────────────────────────────
@@ -198,11 +201,6 @@ class KataGoEngine:
     Locate the binary automatically (searches common paths) or pass it explicitly.
     """
 
-    _DEFAULT_BINS = [
-        Path(__file__).parent / 'bin' / 'katago.exe',
-        Path(__file__).parent / 'bin' / 'katago',
-    ]
-
     def __init__(
         self,
         model: str,
@@ -213,23 +211,11 @@ class KataGoEngine:
         self.model       = str(model)
         self.config      = str(config) if config else None
         self.human_model = str(human_model) if human_model else None
-        self.katago_bin  = str(katago_bin) if katago_bin else self._find_binary()
-
-    def _find_binary(self) -> str:
-        import shutil
-        for p in self._DEFAULT_BINS:
-            if p.exists():
-                return str(p)
-        found = shutil.which('katago')
-        if found:
-            return found
-        raise FileNotFoundError(
-            "katago binary not found.\n"
-            "  Option A: place katago.exe under  <project>/bin/katago.exe\n"
-            "  Option B: add katago.exe to system PATH\n"
-            "  Option C: pass katago_bin='/path/to/katago.exe' explicitly\n"
-            "Download from: https://github.com/ahillzhao-msn/KataGo/releases"
-        )
+        # discover_katago verifies fork capability (batch_analysis support)
+        # even for explicit paths — stock katago fails fast here rather than
+        # erroring mid-request.
+        from katarank.katago_setup import discover_katago
+        self.katago_bin  = discover_katago(katago_bin)
 
     def _base_cmd(self) -> List[str]:
         cmd = [self.katago_bin, 'batch_analysis', '-model', self.model]
@@ -283,6 +269,7 @@ class KataGoEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            creationflags=_CREATE_NO_WINDOW,
         )
 
         # Drain stderr in a background thread: katago writes progress there,
@@ -412,14 +399,17 @@ class KataGoEngine:
             'analyzeTurns':  list(range(n_turns)),
         }
 
-        cmd = [self.katago_bin, 'analysis', '-model', self.model]
-        if self.config:
-            cmd += ['-config', self.config]
+        # `katago analysis` requires -config; auto-provision when absent
+        from katarank.katago_setup import ensure_analysis_config
+        cfg = ensure_analysis_config(self.config)
+        cmd = [self.katago_bin, 'analysis', '-model', self.model,
+               '-config', cfg]
 
         try:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                creationflags=_CREATE_NO_WINDOW,
             )
             stdout, _ = proc.communicate(
                 input=(_json.dumps(query) + '\n').encode('utf-8'),
@@ -598,6 +588,7 @@ class PersistentKataGoEngine(KataGoEngine):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            creationflags=_CREATE_NO_WINDOW,
         )
 
         ready = threading.Event()

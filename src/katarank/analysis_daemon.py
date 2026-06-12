@@ -23,12 +23,16 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import sys
 import threading
+import time
 import uuid
 from collections import deque
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 
 class _QueryFuture:
@@ -102,9 +106,14 @@ class AnalysisDaemon:
         if self._alive:
             return self
 
-        cmd = [self._bin, 'analysis', '-model', self._model]
-        if self._config:
-            cmd += ['-config', self._config]
+        # `katago analysis` refuses to start without -config; auto-provision
+        # a VRAM-aware one when the caller didn't supply any.
+        if not self._config:
+            from katarank.katago_setup import ensure_analysis_config
+            self._config = ensure_analysis_config()
+
+        cmd = [self._bin, 'analysis',
+               '-model', self._model, '-config', self._config]
 
         self._proc = subprocess.Popen(
             cmd,
@@ -112,6 +121,7 @@ class AnalysisDaemon:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            creationflags=_CREATE_NO_WINDOW,
         )
         self._alive = True
 
@@ -120,8 +130,29 @@ class AnalysisDaemon:
         threading.Thread(target=self._reader_loop,  daemon=True,
                          name='katago-analysis-stdout').start()
 
-        logger.info('AnalysisDaemon started (model=%s)', self._model)
+        # Fast-fail: argument/config errors kill katago within ~2 s, long
+        # before the model load completes. Surface the stderr tail now
+        # instead of timing out on the first query minutes later.
+        time.sleep(2.0)
+        if self._proc.poll() is not None:
+            rc   = self._proc.returncode
+            tail = '\n'.join(list(self._stderr_tail)[-10:])
+            self._alive = False
+            self._proc = None
+            raise RuntimeError(
+                f'AnalysisDaemon failed to start (exit code {rc})\n{tail}'
+            )
+
+        logger.info('AnalysisDaemon started (model=%s, config=%s)',
+                    self._model, self._config)
         return self
+
+    def restart(self) -> 'AnalysisDaemon':
+        """Stop (if needed) and start fresh — used by the server watchdog."""
+        self.stop()
+        self._alive = False
+        self._proc = None
+        return self.start()
 
     def stop(self) -> None:
         if not self._alive or self._proc is None:

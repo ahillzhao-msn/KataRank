@@ -30,9 +30,12 @@ Review endpoints return ReviewOutput = KAB2Output + 'moves' list
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -182,9 +185,38 @@ def create_app(
     )
     analysis_daemon.start()
 
+    # Watchdog: restart dead daemons every 10 s without manual intervention.
+    _watchdog_stop = threading.Event()
+
+    def _watchdog():
+        while not _watchdog_stop.wait(timeout=10):
+            if not analysis_daemon.is_alive:
+                tail = '\n'.join(list(analysis_daemon._stderr_tail)[-5:])
+                logger.warning('AnalysisDaemon died — restarting%s',
+                               f'\nlast stderr:\n{tail}' if tail else '')
+                try:
+                    analysis_daemon.restart()
+                    logger.info('AnalysisDaemon restarted successfully')
+                except Exception as exc:
+                    logger.error('AnalysisDaemon restart failed: %s', exc)
+            if persistent and isinstance(engine, PersistentKataGoEngine):
+                if engine._proc is None or engine._proc.poll() is not None:
+                    tail = ''.join(list(engine._stderr_tail)[-5:])
+                    logger.warning('PersistentKataGoEngine died — restarting%s',
+                                   f'\nlast stderr:\n{tail}' if tail else '')
+                    try:
+                        engine._proc = None
+                        engine.start()
+                        logger.info('PersistentKataGoEngine restarted successfully')
+                    except Exception as exc:
+                        logger.error('PersistentKataGoEngine restart failed: %s', exc)
+
+    threading.Thread(target=_watchdog, daemon=True, name='katarank-watchdog').start()
+
     @asynccontextmanager
     async def _lifespan(app):
         yield
+        _watchdog_stop.set()
         analysis_daemon.stop()
         if persistent:
             engine.close()
@@ -458,6 +490,10 @@ from katarank.workflow import (
 
 def main():
     _require_fastapi()
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
     parser = argparse.ArgumentParser(description='KataRank API Server')
     parser.add_argument('--model',       required=True,  help='KataGo model .bin.gz')
     parser.add_argument('--checkpoint',  default=None,   help='KataRankModel .pt')
