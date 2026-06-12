@@ -23,82 +23,81 @@ raw SGF files to rank prediction.
 
 ---
 
-## Architecture overview
+## Installation
 
-```
-SGF files / directory / strings
-   │
-   ▼
-katago batch_analysis           ← customized C++ binary (katago-fork)
-   │  per-move features, two delivery modes:
-   │    file:   combined <stem>.npz per game (compressed, archival)
-   │    stream: per-player frames with game id (uncompressed, pipe)
-   ▼
-KAB2Dataset / KAB2StreamDataset ← data pipeline (BaseKAB2Dataset contract)
-   │
-   ▼
-KataRankModel                   ← DualViewSetTransformer + ordinal heads
-   │  causal B/W cross-attention; 29 rank classes (20k–9d)
-   ▼
-KAB2Output (inference)  /  TrainingReport (training)
-```
+### Prerequisites
 
-## Output formats
+- **Python** 3.10+ (3.11+ recommended)
+- **PyTorch** 2.0+ (installed automatically — CUDA version auto-detected)
+- **KataGo binary**: a customized `katago` build from
+  [ahillzhao-msn/KataGo](https://github.com/ahillzhao-msn/KataGo/releases).
+  Place the executable in `src/katarank/bin/` or pass `--katago-bin` at runtime
+  (auto-detected if added to PATH).
+- **KataGo model weights**: e.g., `kata1-b18c384nbt.bin.gz` from
+  [KataGo releases](https://github.com/lightvector/KataGo/releases).
+- **HumanSL model weights**: Required for training data generation, optional
+  for inference.
 
-### File mode — combined KAB2 (one file per game)
+### Method 1: uv (recommended)
 
-`<sgf-stem>.npz` = `[4B B_size][B KAB2 payload][4B W_size][W KAB2 payload]`,
-each payload zlib-compressed. A `_meta.csv` with per-game summaries is
-written alongside.
+[uv](https://docs.astral.sh/uv/) is the fastest Python package manager.
 
-KAB2 payload layout:
+```bash
+# 1. Clone the repository
+git clone https://github.com/ahillzhao-msn/katarank.git
+cd katarank
 
-```
-Offset  Size  Field
-     0     4  magic b'KAB2'
-     4     4  numMoves         (int32)
-     8     4  scalarDim        (int32, = 10)
-    12     4  trunkDim         (int32, 0 in lite mode)
-    16     4  pickDim          (int32, = trunkDim)
-    20     4  nnXLen           (int32)
-    24     4  nnYLen           (int32)
-    28     4  flags            (int32, bit0 = zlib compressed)
-    32    64  PlayerSummary    (16 × float32)
-    96     –  move records     (numMoves × moveDim float32)
+# 2a. Core only (CLI inference + training)
+uv sync
+
+# 2b. With API server (REST API + daemon mode)
+uv sync --extra api
+
+# 3. Verify installation
+uv run katarank-infer --help
+uv run katarank-server --help   # only if --extra api was used
 ```
 
-`moveDim = scalarDim + 2 × trunkDim`
+### Method 2: pip + requirements.txt
 
-Key `PlayerSummary` fields:
+```bash
+git clone https://github.com/ahillzhao-msn/katarank.git
+cd katarank
 
-| Index | Field | Description |
-|-------|-------|-------------|
-| 2 | `meanLogPrior` | Primary training target (log KataGo policy prior) |
-| 10 | `humanRankIdx` | 0–28 (20k–9d), –1 if HumanSL not computed |
-| 11 | `humanLogPrior` | HumanSL confidence weight |
+# Install all dependencies (core + API server)
+pip install -r requirements.txt
 
-### Stream mode — per-player frames with game id
+# Or selectively:
+#   Core only:      pip install numpy pyyaml torch
+#   With API:       pip install 'katarank[api]'
 
+# Verify
+python -m katarank.cli --help
+python -m katarank.api.server --help
 ```
-[1 byte side 'B'/'W'][4B uint32 idLen][game id][4B uint32 size][KAB2 payload]
+
+### Method 3: Install from wheel (for deployment)
+
+Download the `.whl` from the [releases page](https://github.com/ahillzhao-msn/katarank/releases).
+
+```bash
+pip install katarank-*.whl
+# Or with API extras:
+pip install 'katarank[api] @ katarank-*.whl'
 ```
 
-One frame per player per game (uncompressed), terminated by a single `0x00`
-byte. The game id is the SGF filename stem, letting the Python reader pair
-B/W frames and map results back to inputs. Progress goes to stderr, binary
-data to stdout.
+### Verify the kata binary is detected
+
+```bash
+# Auto-detection
+uv run python -c "from katarank.katago_setup import find_katago; print(find_katago())"
+```
+
+If `None`, either add katago to PATH or place it in `src/katarank/bin/`.
 
 ---
 
 ## Quick start
-
-### Install with uv
-
-```bash
-git clone <repo> katarank
-cd katarank
-uv sync           # creates .venv, installs katarank + dependencies
-```
 
 ### Generate KAB2 features from SGF files
 
@@ -153,20 +152,87 @@ anchors); it aborts otherwise. Outputs: `best.pt`, `final.pt`, and
 `training_report.json` (the `TrainingReport` schema: loss curves, rank
 MAE/accuracy, rating correlation, learned ordinal thresholds).
 
-### REST API
+---
+
+## REST API server
+
+### Quick start
 
 ```bash
-uv run katarank-server --model kata1.bin.gz --checkpoint nets/katarank/best.pt \
+# Start with uv (auto-installs fastapi/uvicorn via --extra api)
+uv sync --extra api
+uv run katarank-server --model kata1-b18c384nbt.bin.gz \
+    --checkpoint nets/katarank/best.pt \
     --host 0.0.0.0 --port 8765 --sgf-root /data/sgf --max-concurrency 1
 ```
 
-Endpoints: `POST /rank/string | /rank/file | /rank/batch | /rank/directory`
-(returns `KAB2Output` JSON), `POST /review/string | /review/file | /review/batch`
-(returns `ReviewOutput` = `KAB2Output` + per-move records, see
-`docs/REVIEW_API_DESIGN.md`), `GET /health`. `--sgf-root` restricts file-path
-endpoints to a directory; `--max-concurrency` serializes katago runs.
+### Endpoints
 
-### Persistent engine (daemon mode)
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/rank/string` | Rank from SGF content string |
+| `POST` | `/rank/file` | Rank from SGF file path |
+| `POST` | `/rank/batch` | Rank multiple SGFs (file paths or strings) |
+| `POST` | `/rank/directory` | Rank all `.sgf` files in a directory |
+| `POST` | `/review/string` | Rank + per-move records from SGF string |
+| `POST` | `/review/file` | Rank + per-move records from SGF file |
+| `POST` | `/review/batch` | Rank + per-move records for multiple SGFs |
+| `POST` | `/ownership/string` | Per-position ownership for each move |
+| `POST` | `/variation/string` | What-if branch analysis with HumanSL profiles |
+| `GET` | `/health` | Liveness check |
+| `POST` | `/engine/reset` | Soft reset (clear daemon caches) |
+| `POST` | `/engine/restart` | Hard restart (reload models) |
+
+Review endpoints return `ReviewOutput` = `KAB2Output` + `moves` list
+(see `docs/REVIEW_API_DESIGN.md`); request schemas are identical to `/rank/*`.
+
+### Production deployment
+
+#### Option A: Direct background process
+
+```bash
+# With logging to file
+nohup uv run katarank-server \
+    --model /path/to/kata1.bin.gz \
+    --checkpoint /path/to/best.pt \
+    --host 0.0.0.0 --port 8765 \
+    --sgf-root /data/sgf \
+    </dev/null >logs/katarank.log 2>&1 &
+```
+
+#### Option B: Windows service (NSSM)
+
+1. Download [NSSM](https://nssm.cc/download) and place `nssm.exe` in PATH.
+
+2. Install:
+
+```powershell
+# PowerShell (as Administrator)
+.\scripts\install-service.ps1 `
+    -Model "C:\models\kata1-b18c384nbt.bin.gz" `
+    -Checkpoint "C:\models\katarank\best.pt" `
+    -Port 8765 `
+    -SgfRoot "C:\data\sgf"
+```
+
+3. Manage:
+
+```cmd
+net start KataRank       :: start
+net stop KataRank        :: stop
+nssm status KataRank     :: check status
+nssm remove KataRank confirm  :: uninstall
+```
+
+#### Option C: Use katarank-server.bat
+
+```cmd
+scripts\katarank-server.bat --model kata1.bin.gz --host 0.0.0.0 --port 8765
+```
+
+---
+
+## Persistent engine (daemon mode)
 
 `katago batch_analysis -daemon` keeps models loaded and accepts jobs via
 stdin (one line = path to a games.csv; `reset` clears NN caches; `quit`
@@ -188,7 +254,9 @@ with PersistentKataGoEngine(model='kata1.bin.gz', mode='lite') as eng:
 REST control: `POST /engine/reset` (soft), `POST /engine/restart` (hard),
 `GET /health` reports daemon liveness.
 
-### Python API
+---
+
+## Python API
 
 ```python
 from katarank import KataGoEngine, run_rank_files
@@ -216,6 +284,94 @@ engine.batch_to_files(output_dir='data/kab2/', sgf_paths=['game1.sgf'])
 
 ---
 
+## Build from source
+
+```bash
+# Build wheel
+uv build
+
+# Output: dist/katarank-0.2.0-py3-none-any.whl
+
+# Install the wheel
+pip install dist/katarank-0.2.0-py3-none-any.whl
+# With API extras:
+pip install 'katarank[api] @ dist/katarank-0.2.0-py3-none-any.whl'
+
+# Or publish to PyPI (requires API token)
+# uv publish
+```
+
+---
+
+## Output formats
+
+### File mode — combined KAB2 (one file per game)
+
+`<sgf-stem>.npz` = `[4B B_size][B KAB2 payload][4B W_size][W KAB2 payload]`,
+each payload zlib-compressed. A `_meta.csv` with per-game summaries is
+written alongside.
+
+KAB2 payload layout:
+
+```
+Offset  Size  Field
+     0     4  magic b'KAB2'
+     4     4  numMoves         (int32)
+     8     4  scalarDim        (int32, = 10)
+    12     4  trunkDim         (int32, 0 in lite mode)
+    16     4  pickDim          (int32, = trunkDim)
+    20     4  nnXLen           (int32)
+    24     4  nnYLen           (int32)
+    28     4  flags            (int32, bit0 = zlib compressed)
+    32    64  PlayerSummary    (16 × float32)
+    96     –  move records     (numMoves × moveDim float32)
+```
+
+`moveDim = scalarDim + 2 × trunkDim`
+
+Key `PlayerSummary` fields:
+
+| Index | Field | Description |
+|-------|-------|-------------|
+| 2 | `meanLogPrior` | Primary training target (log KataGo policy prior) |
+| 10 | `humanRankIdx` | 0–28 (20k–9d), –1 if HumanSL not computed |
+| 11 | `humanLogPrior` | HumanSL confidence weight |
+
+### Stream mode — per-player frames with game id
+
+```
+[1 byte side 'B'/'W'][4B uint32 idLen][game id][4B uint32 size][KAB2 payload]
+```
+
+One frame per player per game (uncompressed), terminated by a single `0x00`
+byte. The game id is the SGF filename stem, letting the Python reader pair
+B/W frames and map results back to inputs. Progress goes to stderr, binary
+data to stdout.
+
+---
+
+## Architecture overview
+
+```
+SGF files / directory / strings
+   │
+   ▼
+katago batch_analysis           ← customized C++ binary (katago-fork)
+   │  per-move features, two delivery modes:
+   │    file:   combined <stem>.npz per game (compressed, archival)
+   │    stream: per-player frames with game id (uncompressed, pipe)
+   ▼
+KAB2Dataset / KAB2StreamDataset ← data pipeline (BaseKAB2Dataset contract)
+   │
+   ▼
+KataRankModel                   ← DualViewSetTransformer + ordinal heads
+   │  causal B/W cross-attention; 29 rank classes (20k–9d)
+   ▼
+KAB2Output (inference)  /  TrainingReport (training)
+```
+
+---
+
 ## Project layout
 
 ```
@@ -226,6 +382,8 @@ katarank/
 │   ├── workflow.py          Training/Inference workflows, rank→KAB2Output
 │   ├── schema.py            KAB2Sample/Batch/Output, TrainingReport, serialization
 │   ├── cli.py               katarank-infer entry point
+│   ├── katago_setup.py      KataGo binary discovery + VRAM auto-config
+│   ├── analysis_daemon.py   Persistent `katago analysis` (JSON protocol)
 │   ├── api/server.py        katarank-server (FastAPI, thin shell over workflow)
 │   ├── data/
 │   │   ├── preprocess.py    read_kab2(), read_kab2_combined(), probe_kab2_dim()
@@ -242,9 +400,15 @@ katarank/
 │   └── train/
 │       ├── training.py      katarank-train entry point + TrainingReport emission
 │       └── config_kata_native.yaml
+├── scripts/
+│   ├── katarank-server.bat  Windows startup script
+│   ├── install-service.ps1  Windows NSSM service installer
+│   └── benchmark.py         Performance benchmark
 ├── tests/
-├── scripts/benchmark.py
-└── docs/
+├── docs/
+├── requirements.txt         Pinned runtime deps (core + API server)
+├── pyproject.toml           Project metadata + build config
+└── README.md
 ```
 
 The customized KataGo lives in a separate working tree (`katago-fork/`),
