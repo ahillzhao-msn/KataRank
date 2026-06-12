@@ -505,6 +505,20 @@ def create_app(
 
         infos = resp.get('moveInfos', [])
         root  = resp.get('rootInfo', {})
+
+        # humanSLProfile does NOT steer the search — KataGo only attaches
+        # the human policy distribution. Rank-realistic play must therefore
+        # be read from humanPolicy, not from moveInfos order.
+        human_moves = []
+        hp = resp.get('humanPolicy')
+        if hp and len(hp) >= 361:
+            cols = 'ABCDEFGHJKLMNOPQRST'
+            top = sorted(range(361), key=lambda i: hp[i], reverse=True)[:5]
+            human_moves = [
+                {'move': f'{cols[i % 19]}{19 - i // 19}', 'prob': hp[i]}
+                for i in top if hp[i] > 0
+            ]
+
         return {
             'moves': [
                 {'move': mi.get('move'), 'winrate': mi.get('winrate'),
@@ -512,6 +526,7 @@ def create_app(
                  'order': mi.get('order'), 'prior': mi.get('prior')}
                 for mi in infos
             ],
+            'human_moves': human_moves,
             'root': {'winrate': root.get('winrate'),
                      'score_lead': root.get('scoreLead')},
         }
