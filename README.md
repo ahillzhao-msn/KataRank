@@ -86,14 +86,101 @@ pip install katarank-*.whl
 pip install 'katarank[api] @ katarank-*.whl'
 ```
 
-### Verify the kata binary is detected
+---
+
+## Configuration
+
+KataRank uses a layered configuration system that auto-discovers the KataGo
+binary, generates VRAM-tuned analysis configs, and accepts overrides at every
+level.
+
+### 1. KataGo binary discovery
+
+The discovery order (first match wins):
+
+| Priority | Source | How to set |
+|----------|--------|-----------|
+| 1 | `--katago-bin` CLI arg | Passed explicitly to `katarank-infer` / `katarank-server` |
+| 2 | `$KATAGO_BIN` env var | `set KATAGO_BIN=C:\path\to\katago.exe` (Windows) |
+| 3 | Bundled `src/katarank/bin/` | Place `katago.exe` in that directory |
+| 4 | Known install directories | `~/katago-fork/release/`, `~/katago/`, etc. |
+| 5 | `PATH` | `where katago` must find it |
 
 ```bash
-# Auto-detection
-uv run python -c "from katarank.katago_setup import find_katago; print(find_katago())"
+# See exactly what the resolver finds
+uv run python -c "
+from katarank.katago_setup import discover_katago
+try:
+    print('katago:', discover_katago())
+except FileNotFoundError as e:
+    print(e)
+"
+
+# Test with explicit path
+uv run python -c "
+from katarank.katago_setup import discover_katago
+print(discover_katago(explicit=r'C:\katago\katago.exe'))
+"
 ```
 
-If `None`, either add katago to PATH or place it in `src/katarank/bin/`.
+The discovery also verifies the binary is a **custom fork** (stock KataGo
+rejects `batch_analysis`). If it finds a stock build, it skips it and
+continues searching.
+
+### 2. VRAM-tuned analysis config (`katago analysis -config`)
+
+The analysis daemon (**not** `batch_analysis`) requires a `.cfg` file. If
+none is provided, KataRank **auto-generates one** at
+`~/.katarank/analysis.cfg` based on your GPU's VRAM:
+
+| VRAM | `numSearchThreads` | `numAnalysisThreads` | `nnMaxBatchSize` |
+|------|-------------------|---------------------|-----------------|
+| ≥ 16 GB | 10 | 4 | 64 |
+| ≥ 8 GB | 8 | 2 | 32 |
+| ≥ 4 GB | 6 | 2 | 16 |
+| < 4 GB / unknown | min(CPU cores, 4) | 1 | 8 |
+
+The auto-generated config is cached — **delete `~/.katarank/analysis.cfg`**
+to regenerate after a GPU upgrade.
+
+Override with `--config` (CLI) or `$KATAGO_CONFIG`:
+
+```bash
+uv run katarank-server --model kata1.bin.gz --config my-tuned.cfg
+```
+
+### 3. Model paths
+
+| Model | Required | Purpose | Where to get it |
+|-------|----------|---------|----------------|
+| `--model` (KataGo) | **Yes** | Neural net for batch analysis | [KataGo releases](https://github.com/lightvector/KataGo/releases) |
+| `--checkpoint` (KataRank) | Optional | Trained rank model `.pt` | Produced by `katarank-train` |
+| `--human-model` | Training: **yes** / Inference: optional | HumanSL rank anchors for training | Custom fork's release artifacts |
+
+### 4. Environment variables reference
+
+| Variable | Used by | Default |
+|----------|---------|---------|
+| `KATAGO_BIN` | Binary discovery | auto-detected |
+| `KATAGO_CONFIG` | `ensure_analysis_config()` | auto-generated `~/.katarank/analysis.cfg` |
+| `CUDA_VISIBLE_DEVICES` | PyTorch / KataGo | all GPUs |
+| `KATAGO_GLOBAL_ARGS` | Extra flags passed to every katago invocation | (none) |
+
+### 5. Quick verification
+
+```bash
+# Full equipment check — binary, config, and a 1-visit end-to-end smoke test
+uv run python -c "
+from katarank.katago_setup import discover_katago, ensure_analysis_config, smoke_test_analysis
+
+bin = discover_katago()
+cfg = ensure_analysis_config()
+model = 'path/to/kata1.bin.gz'  # substitute your path
+
+ok, msg = smoke_test_analysis(bin, model, cfg)
+print(f'Equipment check: {\"PASS\" if ok else \"FAIL\"} — {msg}')
+"
+```
 
 ---
 
@@ -411,8 +498,9 @@ katarank/
 └── README.md
 ```
 
-The customized KataGo lives in a separate working tree (`katago-fork/`),
-modified in `cpp/command/batch_analysis.cpp`.
+The customized KataGo subcommands live in a separate project
+(`ahillzhao-msn/KataGo`), with `batch_analysis` additions in
+`cpp/command/batch_analysis.cpp`.
 
 ---
 
@@ -448,5 +536,4 @@ Convention: `loss_fn(predictions, targets) -> dict` with key `'total'`.
 
 ## License
 
-Python code in `src/katarank/`: MIT. KataGo C++ code: AGPLv3 (see
-`LICENSE-GPLv3`).
+MIT — see `LICENSE`.

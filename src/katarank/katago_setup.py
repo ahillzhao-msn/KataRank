@@ -1,18 +1,18 @@
 """
 KataGo equipment QA — discovery, config provisioning, verification.
 
-KataRank depends on a *custom fork* of KataGo (the `batch_analysis`
-subcommand emits KAB2 frames; stock KataGo does not have it). This module
-guarantees the engine is correctly equipped before any daemon starts:
+KataRank depends on KataGo's custom `batch_analysis` subcommand (it emits
+KAB2 frames; stock KataGo does not have it). This module guarantees the
+engine is correctly equipped before any daemon starts:
 
-  1. discover_katago()        — resolve the binary (explicit → env → bundled
-                                → known install dirs → PATH) and verify the
-                                fork capability (`batch_analysis` present).
+  1. discover_katago()      — resolve the binary (explicit → env → bundled
+                              → known install dirs → PATH) and verify
+                              batch_analysis capability.
   2. ensure_analysis_config() — `katago analysis` REQUIRES -config; when the
                                 caller provides none, generate a VRAM-aware
                                 config (cached at ~/.katarank/analysis.cfg).
-  3. smoke_test_analysis()    — optional end-to-end check: one 1-visit query
-                                through a real `katago analysis` process.
+  3. smoke_test_analysis()  — optional end-to-end check: one 1-visit query
+                              through a real `katago analysis` process.
 
 Ported from go-analyzer's built-in discovery.py / tuning.py (now archived);
 live candidate benchmarking was dropped in favour of a static VRAM tier
@@ -44,7 +44,7 @@ def _candidate_binaries() -> list:
     home = Path.home()
     return [
         Path(__file__).parent / 'bin' / _EXE,          # bundled with katarank
-        home / 'katago-fork' / 'release' / _EXE,       # local fork build
+        home / 'katago-fork' / 'release' / _EXE,       # custom build
         home / 'katago-fork' / 'cpp' / _EXE,
         home / 'katago' / _EXE,
         home / 'katago' / 'opencl' / _EXE,
@@ -52,9 +52,9 @@ def _candidate_binaries() -> list:
 
 
 def has_batch_analysis(katago_bin: str, timeout: float = 15.0) -> bool:
-    """True if the binary is the custom fork (supports `batch_analysis`).
+    """True if the binary supports the `batch_analysis` subcommand.
 
-    Stock katago answers 'Unknown subcommand: batch_analysis'; the fork
+    Stock katago answers 'Unknown subcommand: batch_analysis'; a custom build
     recognises the subcommand (and merely rejects the probe argument), so
     the distinguishing signal is the stderr text, not the exit code.
     """
@@ -72,7 +72,7 @@ def has_batch_analysis(katago_bin: str, timeout: float = 15.0) -> bool:
 
 def discover_katago(explicit: Optional[str] = None,
                     require_fork: bool = True) -> str:
-    """Resolve the KataGo binary, verifying fork capability.
+    """Resolve the KataGo binary, verifying batch_analysis support.
 
     Resolution order: explicit arg → $KATAGO_BIN → bundled bin/ →
     known install dirs → PATH. Raises FileNotFoundError with an
