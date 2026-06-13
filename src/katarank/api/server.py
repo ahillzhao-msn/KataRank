@@ -60,6 +60,7 @@ if _FASTAPI_AVAILABLE:
         sgf: str
         mode: str = 'lite'
         min_moves: int = 10
+        include_ownership: bool = True
 
     class RankFileRequest(BaseModel):
         path: str
@@ -373,15 +374,16 @@ def create_app(
     def review_string(req: RankStringRequest):
         """Rank + per-move review records from an SGF content string.
 
-        Ownership (361 floats) is attached via the persistent AnalysisDaemon,
-        never persisted — stream/online mode only.
+        Ownership (361 floats) is attached via the persistent AnalysisDaemon
+        when include_ownership=True (default). Set to False for batch
+        analysis to skip the ~5s per-game overhead.
         """
         try:
             with engine_sem:
                 results = _run_review_strings(
                     engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
-                    include_ownership=True,
-                    analysis_daemon=analysis_daemon,
+                    include_ownership=req.include_ownership,
+                    analysis_daemon=analysis_daemon if req.include_ownership else None,
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
