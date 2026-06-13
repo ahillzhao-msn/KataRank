@@ -187,6 +187,51 @@ def ensure_analysis_config(config: Optional[str] = None,
     return str(cfg_path)
 
 
+# ─── 2b. Model discovery ────────────────────────────────────────────────────
+
+def discover_model(explicit: Optional[str] = None) -> str:
+    """Resolve the best available KataGo model (.bin.gz).
+
+    Resolution order:
+      1. explicit argument (--model CLI flag)
+      2. $KATAGO_MODEL env var
+      3. ~/.katago/models/  — largest .bin.gz (proxy for strongest network)
+      4. ~/.katarank/models/
+    Raises FileNotFoundError with an actionable message when nothing is found.
+    """
+    candidates: list[Optional[str]] = [
+        explicit,
+        os.environ.get('KATAGO_MODEL'),
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            logger.info('katago model: %s', c)
+            return c
+
+    search_dirs = [
+        Path.home() / '.katago' / 'models',
+        Path.home() / '.katarank' / 'models',
+    ]
+    best: Optional[Path] = None
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        models = sorted(d.glob('*.bin.gz'), key=lambda p: p.stat().st_size, reverse=True)
+        if models:
+            best = models[0]
+            break
+
+    if best:
+        logger.info('katago model (auto-discovered): %s', best)
+        return str(best)
+
+    raise FileNotFoundError(
+        'No KataGo model found. Tried: explicit arg, $KATAGO_MODEL, '
+        '~/.katago/models/, ~/.katarank/models/.\n'
+        'Fix: place a .bin.gz model in ~/.katago/models/ or pass --model.'
+    )
+
+
 # ─── 3. Smoke verification ───────────────────────────────────────────────────
 
 def smoke_test_analysis(katago_bin: str, model: str, config: str,

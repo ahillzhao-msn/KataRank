@@ -1,14 +1,31 @@
 [project]
 name = "katarank"
-version = "0.2.0"
+version = "0.3.0"
 description = "Go player rank assessment via KataGo neural analysis"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
+    "annotated-doc>=0.0.4",
+    "annotated-types>=0.7.0",
+    "anyio>=4.0",
+    "click>=8.0",
+    "fastapi>=0.110",
+    "filelock>=3.0",
+    "h11>=0.14",
+    "httptools>=0.6",
+    "jinja2>=3.0",
     "numpy>=1.24",
+    "pydantic>=2.0",
+    "pydantic-core>=2.0",
+    "python-dotenv>=1.0",
     "pyyaml>=6.0",
+    "starlette>=1.0",
     "torch>=2.12.0",
+    "typing-extensions>=4.0",
+    "uvicorn[standard]>=0.29",
+    "watchfiles>=1.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -31,9 +48,13 @@ artifacts = ["src/katarank/bin/*"]
 
 [dependency-groups]
 dev = [
+    "katarank",
     "pytest>=8.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.uv.sources]
+katarank = { workspace = true }

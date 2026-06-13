@@ -1,165 +1,94 @@
-# KataRank Workspace Setup
+# KataRank — Quick Start
 
-Quick guide to get a working environment from scratch.
-
----
-
-## Recommended directory layout
-
-```
-workspace/
-├── katarank/                    ← this repository
-│   ├── src/katarank/bin/        ← katago.exe here (or use KATAGO_BIN)
-│   ├── .env                     ← your local config (gitignored)
-│   ├── logs/                    ← service logs (created on first run)
-│   └── ...
-├── models/
-│   ├── kata1-b18c384nbt.bin.gz  ← KataGo b18 model
-│   └── human_model.bin.gz       ← HumanSL model (optional)
-├── checkpoints/
-│   └── katarank/best.pt         ← trained rank model (optional)
-└── sgf/                         ← game records
-    └── ...
-```
+KataRank is the analysis backend for **GoPredict**. It wraps the custom KataGo
+fork (`katago-fork`) and exposes a REST API that GoPredict calls. KataGo runs
+on Windows using OpenCL for best GPU performance; GoPredict itself runs in WSL/Docker.
 
 ---
 
-## Step 1 — Clone and install
+## Prerequisites
+
+- **Python 3.11+** — https://python.org/downloads
+- **uv** — `pip install uv`
+- **katago-fork binary** — build from [ahillzhao-msn/KataGo](https://github.com/ahillzhao-msn/KataGo)
+  or download a pre-built release. Place `katago.exe` in `src\katarank\bin\` or set `KATAGO_BIN`.
+- **KataGo model weights** — place a `.bin.gz` in `~/.katago/models/` for auto-discovery,
+  or download from https://github.com/lightvector/KataGo/releases
+
+---
+
+## Install
 
 ```powershell
 git clone https://github.com/ahillzhao-msn/katarank.git
 cd katarank
-
-# Core + API server
 uv sync --extra api
-
-# Verify
-uv run katarank-infer --help
 ```
-
-If you don't have `uv`: `pip install uv` or see https://docs.astral.sh/uv/
 
 ---
 
-## Step 2 — Get KataGo binary
+## Configure
 
-Download the custom fork binary from [GitHub Releases](https://github.com/ahillzhao-msn/KataGo/releases).
+On first run a config template is written to `~/.katarank/server.toml`. Edit it once:
 
-| Platform | File |
-|----------|------|
-| Windows (CUDA) | `katago.exe` |
-| Windows (OpenCL) | `katago-opencl.exe` |
-| Linux (OpenCL) | `katago` |
-| macOS (Metal) | `katago-metal` |
+```toml
+[katarank]
+# model auto-discovered from ~/.katago/models/ — or set explicitly:
+# model = "C:/path/to/kata1-b18c384nbt.bin.gz"
 
-Place in `src/katarank/bin/katago.exe` **or** set `KATAGO_BIN` in `.env`.
+host = "127.0.0.1"
+port = 8765
+engine_mode = "lite"
+```
 
-> **Stock KataGo won't work** — the fork adds `batch_analysis` which is required.
+KataGo binary is auto-discovered from:
+1. `src/katarank/bin/katago.exe` (bundled)
+2. `~/katago-fork/cpp/katago.exe` (local build)
+3. `KATAGO_BIN` env var or PATH
 
 ---
 
-## Step 3 — Get model weights
-
-### KataGo neural network
-```
-https://github.com/lightvector/KataGo/releases
-```
-Recommended: `kata1-b18c384nbt-s9986952192-d4519031827.bin.gz`
-
-### HumanSL model (optional — needed for training data)
-Provided in the KataGo fork release artifacts as `human_model.bin.gz`.
-
----
-
-## Step 4 — Configure
+## Run the server
 
 ```powershell
-# Copy the template
-cp .env.example .env
-
-# Edit .env with your paths:
-#   KATAGO_BIN=C:\path\to\katago.exe
-#   KATAGO_MODEL=C:\models\kata1-b18c384nbt.bin.gz   (optional — pass via CLI)
+uv run katarank-server
 ```
 
----
-
-## Step 5 — Verify equipment
+Check it's up:
 
 ```powershell
-uv run python -c "
-from katarank.katago_setup import discover_katago, ensure_analysis_config
-bin_path = discover_katago()
-print('KataGo binary:', bin_path)
-cfg_path = ensure_analysis_config()
-print('Analysis config:', cfg_path)
-"
-```
-
-Expected output:
-```
-KataGo binary: C:\...\katago.exe
-Analysis config: C:\Users\<you>\.katarank\analysis.cfg
-```
-
-If binary discovery fails, set `KATAGO_BIN` in `.env` or pass `--katago-bin`.
-
----
-
-## Step 6 — Start the API server
-
-```powershell
-uv run katarank-server `
-    --model C:\models\kata1-b18c384nbt.bin.gz `
-    --host 0.0.0.0 `
-    --port 8765
-
-# Check health
 curl http://localhost:8765/health
 ```
 
-### As a Windows service (auto-start on boot)
-
-```powershell
-# Requires NSSM: https://nssm.cc/download
-# Run as Administrator
-.\scripts\install-service.ps1 `
-    -Model "C:\models\kata1-b18c384nbt.bin.gz" `
-    -Port 8765
-
-net start KataRank
-```
+GoPredict expects the server at `http://localhost:8765` by default
+(set `KATARANK_HOST_URL` in GoPredict's `.env` if you use a different port).
 
 ---
 
-## Environment variable reference
+## Run the CLI
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `KATAGO_BIN` | No | auto-detect | Path to katago binary |
-| `KATAGO_CONFIG` | No | auto-generate | Path to analysis .cfg |
-| `CUDA_VISIBLE_DEVICES` | No | all GPUs | GPU selection |
-| `KATAGO_GLOBAL_ARGS` | No | (none) | Extra flags for katago |
-| `KATARANK_HOST_URL` | No | http://localhost:8765 | Used by gopredict frontend |
+```powershell
+# Rank a single game
+uv run katarank-infer game.sgf
 
-Full reference: see `.env.example`.
+# See all options
+uv run katarank-infer --help
+uv run katarank-server --help
+```
 
 ---
 
 ## Troubleshooting
 
-**`FileNotFoundError: katago binary not found`**  
-→ Set `KATAGO_BIN` in `.env` or place the binary in `src/katarank/bin/`.
+**`katago binary not found`**
+→ Place `katago.exe` in `src\katarank\bin\`, set `KATAGO_BIN` in `.env`, or build from
+  [ahillzhao-msn/KataGo](https://github.com/ahillzhao-msn/KataGo).
 
-**`RuntimeError: katago analysis subprocess exited immediately`**  
-→ Run `katago.exe runtests` to verify the binary. Check if a GPU driver is available.  
-→ Delete `~/.katarank/analysis.cfg` to regenerate a config tuned to your VRAM.
+**`No KataGo model found`**
+→ Place a `.bin.gz` model in `~/.katago/models/` or set `model` in `~/.katarank/server.toml`.
 
-**`ModuleNotFoundError: No module named 'fastapi'`**  
-→ Run `uv sync --extra api` (the `api` extra is required for the server).
+**Slow first start (1–5 min)**
+→ Normal — KataGo loads the model into GPU memory once at boot. Subsequent requests are fast.
 
-**Slow first request (10–30 s)**  
-→ Normal — KataGo loads models into GPU memory on the first query. Subsequent queries are fast because the daemon keeps models loaded.
-
-**Port already in use**  
-→ Change `--port` or stop the existing process: `net stop KataRank`.
+**`No module named 'fastapi'`**
+→ Run `uv sync --extra api`.

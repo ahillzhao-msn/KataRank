@@ -232,7 +232,7 @@ def create_app(
     app = FastAPI(
         title='KataRank API',
         description='Go player rank assessment via KataGo neural analysis',
-        version='0.2.0',
+        version='0.3.0',
         lifespan=_lifespan,
     )
 
@@ -546,44 +546,118 @@ from katarank.workflow import (
 
 # ─── CLI entry point ─────────────────────────────────────────────────────────
 
+_CONFIG_PATH = Path.home() / '.katarank' / 'server.toml'
+_CONFIG_TEMPLATE = """\
+# KataRank server configuration — ~/.katarank/server.toml
+# CLI flags override anything set here.
+
+[katarank]
+# model = "C:/Users/you/.katago/models/kata1-b18c384nbt.bin.gz"
+# katago_bin = ""                 # auto-discovered from ~/katago-fork/cpp/
+# checkpoint = ""                 # KataRank .pt checkpoint (optional)
+# config = ""                     # KataGo analysis .cfg (auto-generated)
+# human_model = ""                # HumanSL model (optional)
+# host = "127.0.0.1"
+# port = 8765
+# engine_mode = "lite"            # lite | full
+# max_concurrency = 1
+# sgf_root = ""                   # restrict file endpoints to this directory
+# device = ""                     # cpu | cuda (auto-detected)
+"""
+
+
+def _load_toml_config() -> dict:
+    """Read ~/.katarank/server.toml if it exists; return the [katarank] table."""
+    if not _CONFIG_PATH.exists():
+        return {}
+    try:
+        import tomllib
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            logger.warning('server.toml found but tomllib unavailable (Python < 3.11 and no tomli installed); ignoring')
+            return {}
+    with open(_CONFIG_PATH, 'rb') as f:
+        data = tomllib.load(f)
+    return data.get('katarank', {})
+
+
+def _write_config_template():
+    """Write the config template to ~/.katarank/server.toml if it doesn't exist."""
+    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not _CONFIG_PATH.exists():
+        _CONFIG_PATH.write_text(_CONFIG_TEMPLATE, encoding='utf-8')
+        print(f'Created config template: {_CONFIG_PATH}')
+        print('Edit it to set your model path and other defaults.')
+
+
 def main():
     _require_fastapi()
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',
     )
-    parser = argparse.ArgumentParser(description='KataRank API Server')
-    parser.add_argument('--model',       required=True,  help='KataGo model .bin.gz')
+    parser = argparse.ArgumentParser(
+        description='KataRank API Server',
+        epilog=f'Default config: {_CONFIG_PATH}  (created on first run if absent)',
+    )
+    parser.add_argument('--model',       default=None,   help='KataGo model .bin.gz (auto-discovered if omitted)')
     parser.add_argument('--checkpoint',  default=None,   help='KataRankModel .pt')
-    parser.add_argument('--katago-bin',  default=None,   help='KataGo binary path')
-    parser.add_argument('--config',      default=None,   help='KataGo config .cfg')
+    parser.add_argument('--katago-bin',  default=None,   help='KataGo binary path (auto-discovered if omitted)')
+    parser.add_argument('--config',      default=None,   help='KataGo config .cfg (auto-generated if omitted)')
     parser.add_argument('--human-model', default=None,   help='HumanSL model .bin.gz')
     parser.add_argument('--device',      default=None,   help='cpu / cuda')
-    parser.add_argument('--host',        default='127.0.0.1')
-    parser.add_argument('--port',        type=int, default=8765)
-    parser.add_argument('--max-concurrency', type=int, default=1,
+    parser.add_argument('--host',        default=None)
+    parser.add_argument('--port',        type=int, default=None)
+    parser.add_argument('--max-concurrency', type=int, default=None,
                         help='Max simultaneous katago analyses (default 1)')
     parser.add_argument('--sgf-root',    default=None,
                         help='Restrict /rank/file and /rank/directory to this directory')
     parser.add_argument('--no-persistent', action='store_true',
                         help='Spawn a fresh katago per request instead of a resident daemon')
-    parser.add_argument('--engine-mode', default='lite', choices=['lite', 'full'],
+    parser.add_argument('--engine-mode', default=None, choices=['lite', 'full'],
                         help="Resident daemon's analysis mode (default lite)")
+    parser.add_argument('--init-config', action='store_true',
+                        help=f'Write a config template to {_CONFIG_PATH} and exit')
     args = parser.parse_args()
 
+    if args.init_config:
+        _write_config_template()
+        return
+
+    # Write template on first run so the user knows the file exists
+    if not _CONFIG_PATH.exists():
+        _write_config_template()
+
+    # Layer: config file defaults → CLI overrides
+    cfg = _load_toml_config()
+
+    def _get(cli_val, key, default=None):
+        """CLI arg wins; fall back to config file; then default."""
+        return cli_val if cli_val is not None else cfg.get(key, default)
+
+    from katarank.katago_setup import discover_model
+    model = _get(args.model, 'model')
+    model = discover_model(model)  # resolves ~/.katago/models/ if still None
+
     app = create_app(
-        katago_model    = args.model,
-        checkpoint_path = args.checkpoint,
-        katago_bin      = args.katago_bin,
-        katago_config   = args.config,
-        human_model     = args.human_model,
-        device          = args.device,
-        max_concurrency = args.max_concurrency,
-        sgf_root        = args.sgf_root,
+        katago_model    = model,
+        checkpoint_path = _get(args.checkpoint,      'checkpoint'),
+        katago_bin      = _get(args.katago_bin,      'katago_bin'),
+        katago_config   = _get(args.config,          'config'),
+        human_model     = _get(args.human_model,     'human_model'),
+        device          = _get(args.device,          'device'),
+        max_concurrency = _get(args.max_concurrency, 'max_concurrency', 1),
+        sgf_root        = _get(args.sgf_root,        'sgf_root'),
         persistent      = not args.no_persistent,
-        engine_mode     = args.engine_mode,
+        engine_mode     = _get(args.engine_mode,     'engine_mode', 'lite'),
     )
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        app,
+        host = _get(args.host, 'host', '127.0.0.1'),
+        port = _get(args.port, 'port', 8765),
+    )
 
 
 if __name__ == '__main__':
