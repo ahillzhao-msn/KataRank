@@ -6,33 +6,37 @@ model:
   num_inducing: 16
   encoder_depth: 2
   cross_depth: 1
-  dropout: 0.1
-  num_rank_classes: 29     # 20k … 9d
+  dropout: 0.2              # ↑ from 0.1 to reduce overfitting
+  num_rank_classes: 29       # 20k … 9d
 
 training:
   data_dir: "data/kab2"
-  meta_csv: ~              # null = auto-detect data_dir/_meta.csv
+  meta_csv: ~                # null = auto-detect data_dir/_meta.csv
   train_split: "T"
   val_split: "V"
 
-  batch_size: 16
-  epochs: 100
-  learning_rate: 0.001
+  batch_size: 32             # ↑ from 16 for more stable gradients
+  epochs: 150
+  learning_rate: 0.0005      # ↓ from 0.001 — gentler start
   lr_min: 0.00001
-  weight_decay: 0.00001
-  patience: 20
+  warmup_epochs: 5           # NEW: linear warmup before cosine decay
+  weight_decay: 0.0001       # ↑ from 1e-5 — stronger regularization
+  patience: 30               # ↑ from 20 — give model more time
   gradient_clip: 1.0
   num_workers: 0
 
-  max_moves: 400           # truncate long sequences (keep last N)
-  min_moves: 5             # skip players with fewer moves
+  stratified: true           # NEW: rank-stratified batch sampling
+  n_bands: 5                 # 5 rank bands (~6 ranks each)
+
+  max_moves: 400             # truncate long sequences (keep last N)
+  min_moves: 5               # skip players with fewer moves
 
   loss_weights:
     rating_mse: 1.0
     bradley_terry: 0.5
-    rank_anchor: 0.3       # confidence-weighted; auto-zero when rank=-1
+    rank_anchor: 0.3         # confidence-weighted; auto-zero when rank=-1
 
-  device: "auto"           # "auto" | "cpu" | "cuda" | "cuda:0"
+  device: "auto"             # "auto" | "cpu" | "cuda" | "cuda:0"
 
 output:
   checkpoint_dir: "nets/katarank"

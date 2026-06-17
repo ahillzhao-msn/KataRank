@@ -1,6 +1,6 @@
-# CLAUDE.md
+# CLAUDE.md (KataRank)
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides project-specific guidance. It supplements the global CLAUDE.md at `~/.claude/CLAUDE.md` which contains the core philosophy (心·道 / 骨·法 / 皮·儒 / 用·兵) inherited from Hermes SOUL.
 
 ## Commands
 
@@ -78,3 +78,30 @@ Requires the **custom KataGo fork** binary (`ahillzhao-msn/KataGo`). Stock KataG
 ### Tests
 
 All tests are in `tests/test_model.py`. Tests are pure-Python/PyTorch and do **not** require a real KataGo binary — the engine is stubbed with synthesized KAB2 bytes or `_StubEngine`. The `TestBatchIndependence` class is a regression suite for the critical batch-isolation invariant (games must not leak attention across batch boundaries).
+
+## LOOM + YiCeNet Bridge (MCP Tools)
+
+This project shares a **cross-session knowledge base** with Hermes via LOOM + YiCeNet.
+These are available globally as **MCP tools** (registered via `claude mcp`):
+
+- **`yicenet_consult`** — Get YiCeNet hexagram guidance when unsure about direction
+- **`loom_search`** — Search cross-session knowledge base for past decisions/context
+- **`loom_store`** — Persist findings/lessons for future recall
+
+Use them directly in conversation (Claude will auto-invoke MCP tools when relevant).
+Example prompts:
+- "Use yicenet_consult — I'm not sure how to approach this refactoring"
+- "Search LOOM for previous discussions about game date resolution"
+
+### Fallback: CLI bridge (when MCP is unavailable)
+
+```bash
+# Search knowledge base
+python C:\Users\xiaoj\.hermes-bridge\loom_cli.py search "game date resolution"
+
+# Store an insight
+python C:\Users\xiaoj\.hermes-bridge\loom_cli.py store "key finding or decision"
+
+# Get YiCeNet guidance
+python C:\Users\xiaoj\.hermes-bridge\loom_cli.py consult "I'm about to refactor X, should I..."
+```

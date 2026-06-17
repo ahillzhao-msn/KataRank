@@ -77,6 +77,37 @@ _TERMINATOR = b'\x00'   # daemon/process exit
 _JOB_DONE   = b'\x01'   # end of one daemon job
 
 
+# ─── Low-level KAB2 builder (ndarray → bytes) ───────────────────────────────
+
+def build_kab2_payload(moves: np.ndarray, info: dict) -> bytes:
+    """Reconstruct a KAB2 binary payload from parsed moves + info.
+
+    Inverse of parse_kab2_buffer(). Produces uncompressed KAB2 suitable
+    for writing into combined .npz files.
+    """
+    num_moves = moves.shape[0]
+    input_dim = moves.shape[1] if num_moves > 0 else info.get('input_dim', 10)
+    scalar_dim = info.get('scalar_dim', min(input_dim, 10))
+    trunk_dim = info.get('trunk_dim', (input_dim - scalar_dim) // 2)
+
+    summary = list(info.get('summary', [0.0] * 16))
+    if len(summary) < 16:
+        summary.extend([0.0] * (16 - len(summary)))
+    summary[_SUM_MEAN_LP] = info.get('mean_log_prior', summary[_SUM_MEAN_LP])
+    hr = info.get('human_rank_idx', -1)
+    summary[_SUM_HUMAN_RANK] = float(hr)
+    summary[_SUM_HUMAN_LP] = info.get('human_log_prior', summary[_SUM_HUMAN_LP])
+
+    header = struct.pack(
+        '<4s7i', _MAGIC, num_moves, scalar_dim, trunk_dim,
+        trunk_dim, 19, 19, 0,  # flags=0 (uncompressed)
+    )
+    header += struct.pack('<16f', *summary[:16])
+
+    payload = moves.astype(np.float32).tobytes() if num_moves > 0 else b''
+    return header + payload
+
+
 # ─── Low-level KAB2 parser (bytes → ndarray) ──────────────────────────────────
 
 def parse_kab2_buffer(data: bytes) -> Tuple[np.ndarray, Dict]:

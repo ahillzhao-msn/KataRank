@@ -43,11 +43,29 @@ class Trainer:
             lr=config.get('learning_rate', 1e-3),
             weight_decay=config.get('weight_decay', 1e-5),
         )
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=config.get('epochs', 100),
-            eta_min=config.get('lr_min', 1e-5),
-        )
+
+        epochs = config.get('epochs', 100)
+        warmup = config.get('warmup_epochs', 0)
+        self.warmup_epochs = warmup
+
+        if warmup > 0:
+            warmup_sched = optim.lr_scheduler.LinearLR(
+                self.optimizer, start_factor=0.1, total_iters=warmup,
+            )
+            cosine_sched = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=max(epochs - warmup, 1),
+                eta_min=config.get('lr_min', 1e-5),
+            )
+            self.scheduler = optim.lr_scheduler.SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_sched, cosine_sched],
+                milestones=[warmup],
+            )
+        else:
+            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=epochs,
+                eta_min=config.get('lr_min', 1e-5),
+            )
 
         self.gradient_clip = config.get('gradient_clip', 1.0)
         self.patience = config.get('patience', 20)
@@ -210,6 +228,8 @@ def main():
         num_workers = tc.get('num_workers', 0),
         max_moves_per_player = tc.get('max_moves', 400),
         min_moves_per_player = tc.get('min_moves', 5),
+        stratified  = tc.get('stratified', False),
+        n_bands     = tc.get('n_bands', 5),
     )
     val_loader, val_ds = make_kab2_loader(
         data_dir    = tc['data_dir'],

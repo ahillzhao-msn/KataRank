@@ -58,3 +58,9 @@ pythonpath = ["src"]
 
 [tool.uv.sources]
 katarank = { workspace = true }
+torch = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

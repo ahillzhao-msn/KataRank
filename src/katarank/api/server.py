@@ -138,6 +138,7 @@ def create_app(
     sgf_root: Optional[str] = None,
     persistent: bool = True,
     engine_mode: str = 'lite',
+    kab2_cache: Optional[str] = None,
 ) -> 'FastAPI':
     """
     Create and configure the FastAPI application.
@@ -236,6 +237,12 @@ def create_app(
         version='0.3.0',
         lifespan=_lifespan,
     )
+
+    # Enable opportunistic KAB2 caching — any game analyzed online is
+    # automatically saved to cache, avoiding duplicate batch_analysis runs.
+    from katarank.workflow import set_kab2_cache_dir
+    if kab2_cache:
+        set_kab2_cache_dir(kab2_cache)
 
     # Load rank model if checkpoint given
     inf_workflow: Optional[InferenceWorkflow] = None
@@ -565,6 +572,7 @@ _CONFIG_TEMPLATE = """\
 # max_concurrency = 1
 # sgf_root = ""                   # restrict file endpoints to this directory
 # device = ""                     # cpu | cuda (auto-detected)
+# kab2_cache = ""                 # set to enable KAB2 caching; leave empty for pure streaming
 """
 
 
@@ -654,6 +662,7 @@ def main():
         sgf_root        = _get(args.sgf_root,        'sgf_root'),
         persistent      = not args.no_persistent,
         engine_mode     = _get(args.engine_mode,     'engine_mode', 'lite'),
+        kab2_cache      = _get(None,                 'kab2_cache'),
     )
     uvicorn.run(
         app,

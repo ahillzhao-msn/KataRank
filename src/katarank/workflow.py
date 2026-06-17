@@ -19,7 +19,10 @@ Usage::
     results = inf.rank_files(['game1.sgf', 'game2.sgf'])
 """
 
+import logging
+import struct
 import time
+from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, TypedDict, Union
 
 import numpy as np
@@ -31,6 +34,49 @@ from katarank.schema import (
     KAB2Output, KAB2Sample, MoveRecord, ReviewOutput,
     kab2_make_sample, kab2_collate,
 )
+
+_log = logging.getLogger(__name__)
+
+# ─── Opportunistic KAB2 caching ─────────────────────────────────────────────
+
+_KAB2_CACHE_DIR: Optional[Path] = None
+
+
+def set_kab2_cache_dir(path: Optional[str]):
+    """Enable opportunistic caching of KAB2 frames during inference.
+
+    When set, any game processed through run_rank_*/run_review_* will
+    have its raw KAB2 frames written to this directory as combined .npz,
+    matching the format produced by ``katago batch_analysis --file-mode``.
+    Games already cached are skipped.
+    """
+    global _KAB2_CACHE_DIR
+    if path is None:
+        _KAB2_CACHE_DIR = None
+    else:
+        _KAB2_CACHE_DIR = Path(path)
+        _KAB2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _cache_kab2_frames(game_id: str, moves_b: np.ndarray, moves_w: np.ndarray,
+                       info_b: dict, info_w: dict):
+    """Write B+W KAB2 frames to cache if caching is enabled and game not cached."""
+    if _KAB2_CACHE_DIR is None:
+        return
+    if not game_id or game_id.startswith('_string_'):
+        return
+    out = _KAB2_CACHE_DIR / f"{game_id}.npz"
+    if out.exists():
+        return
+    try:
+        from katarank.engine import build_kab2_payload
+        b_payload = build_kab2_payload(moves_b, info_b) if len(moves_b) > 0 else b''
+        w_payload = build_kab2_payload(moves_w, info_w) if len(moves_w) > 0 else b''
+        data = (struct.pack('<I', len(b_payload)) + b_payload
+                + struct.pack('<I', len(w_payload)) + w_payload)
+        out.write_bytes(data)
+    except Exception as e:
+        _log.debug("KAB2 cache write failed for %s: %s", game_id, e)
 
 
 # ─── Inference result type ────────────────────────────────────────────────────
@@ -264,10 +310,12 @@ class InferenceWorkflow:
 
     @torch.no_grad()
     def _infer_one(self, x_b, x_w, info_b, info_w) -> RankResult:
+        gid = info_b.get('game_id', '')
+        _cache_kab2_frames(gid, x_b.cpu().numpy(), x_w.cpu().numpy(), info_b, info_w)
         sample = kab2_make_sample(
             moves_b = x_b.cpu().numpy(),
             moves_w = x_w.cpu().numpy(),
-            game_id = info_b.get('game_id', ''),
+            game_id = gid,
         )
         out = self.model(sample['x'].to(self.device), xlens=[sample['seq_len']])
 
@@ -450,6 +498,7 @@ def _review_from_stream(
         empty = np.zeros((0, dim), dtype=np.float32)
         moves_b, info_b = entry.get('B', (empty, {}))
         moves_w, info_w = entry.get('W', (empty, {}))
+        _cache_kab2_frames(gid, moves_b, moves_w, info_b, info_w)
         recs = _move_records(moves_b, moves_w)
 
         if inf_workflow is not None:

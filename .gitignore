@@ -144,6 +144,13 @@ cython_debug/
 # PyCharm
 #.idea/
 
+# Model checkpoints (large binaries)
+nets/
+*.pt
+
+# Windows NUL device artifact
+nul
+
 # Tool droppings / local-only
 .hermes/
 .gitconfig

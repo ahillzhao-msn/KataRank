@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from katarank.schema import (
     BaseKAB2Dataset,
@@ -189,6 +189,88 @@ class KAB2Dataset(BaseKAB2Dataset):
         )
 
 
+# ─── Stratified Rank Sampler ─────────────────────────────────────────────────
+
+class StratifiedRankSampler(Sampler):
+    """Batch sampler that ensures each batch covers multiple rank bands.
+
+    Divides 29 ranks into ``n_bands`` bands (e.g. 5 bands ≈ 6 ranks each).
+    Each batch is constructed by drawing ``batch_size // n_bands`` games from
+    each band (round-robin within each band).  Games without a valid rank
+    label fall into a catch-all band sampled uniformly.
+
+    This prevents batches from being dominated by the peak ranks (4k–5k)
+    and ensures the ordinal head's thresholds see the full rank spectrum.
+    """
+
+    def __init__(
+        self,
+        dataset: 'KAB2Dataset',
+        batch_size: int = 32,
+        n_bands: int = 5,
+        drop_last: bool = False,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.n_bands = n_bands
+        self.drop_last = drop_last
+
+        band_size = NUM_RANK_CLASSES // n_bands  # ~6 ranks per band
+        self.buckets: List[List[int]] = [[] for _ in range(n_bands + 1)]
+
+        for idx, g in enumerate(dataset.games):
+            rank = max(g['rank_b'], g['rank_w'])
+            if rank < 0:
+                self.buckets[n_bands].append(idx)
+            else:
+                band = min(rank // band_size, n_bands - 1)
+                self.buckets[band].append(idx)
+
+        self._rng = np.random.default_rng(42)
+
+    def __iter__(self):
+        shuffled = []
+        for b in self.buckets:
+            arr = np.array(b)
+            self._rng.shuffle(arr)
+            shuffled.append(list(arr))
+
+        pointers = [0] * len(shuffled)
+        per_band = max(1, self.batch_size // self.n_bands)
+        total_yielded = 0
+
+        while total_yielded < len(self.dataset):
+            batch = []
+            for band_idx in range(len(shuffled)):
+                bucket = shuffled[band_idx]
+                if not bucket:
+                    continue
+                ptr = pointers[band_idx]
+                take = per_band if band_idx < self.n_bands else (self.batch_size - len(batch))
+                for _ in range(take):
+                    if ptr >= len(bucket):
+                        self._rng.shuffle(np.asarray(bucket))
+                        ptr = 0
+                    batch.append(bucket[ptr])
+                    ptr += 1
+                pointers[band_idx] = ptr
+
+                if len(batch) >= self.batch_size:
+                    break
+
+            if not batch:
+                break
+            if len(batch) < self.batch_size and self.drop_last:
+                break
+
+            self._rng.shuffle(np.asarray(batch))
+            yield from batch
+            total_yielded += len(batch)
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+
 # ─── DataLoader factory ───────────────────────────────────────────────────────
 
 def make_kab2_loader(
@@ -197,14 +279,27 @@ def make_kab2_loader(
     batch_size: int = 16,
     num_workers: int = 0,
     shuffle: bool = True,
+    stratified: bool = False,
+    n_bands: int = 5,
     **dataset_kwargs,
 ) -> DataLoader:
-    """Convenience factory that wires KAB2Dataset + kab2_collate."""
+    """Convenience factory that wires KAB2Dataset + kab2_collate.
+
+    When ``stratified=True``, uses StratifiedRankSampler instead of random
+    shuffling.  This ensures every batch covers the full rank spectrum.
+    """
     ds = KAB2Dataset(data_dir, split=split, **dataset_kwargs)
+
+    sampler = None
+    if stratified and shuffle:
+        sampler = StratifiedRankSampler(ds, batch_size=batch_size, n_bands=n_bands)
+        shuffle = False  # sampler handles ordering
+
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         collate_fn=kab2_collate,
         pin_memory=False,
