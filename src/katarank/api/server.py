@@ -61,6 +61,7 @@ if _FASTAPI_AVAILABLE:
         mode: str = 'lite'
         min_moves: int = 10
         include_ownership: bool = True
+        game_id: Optional[str] = None  # pass real ID to enable KAB2 caching
 
     class RankFileRequest(BaseModel):
         path: str
@@ -322,7 +323,8 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_strings(
-                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves
+                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
+                    game_ids=[req.game_id] if req.game_id else None,
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -391,6 +393,7 @@ def create_app(
                     engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
                     include_ownership=req.include_ownership,
                     analysis_daemon=analysis_daemon if req.include_ownership else None,
+                    game_ids=[req.game_id] if req.game_id else None,
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

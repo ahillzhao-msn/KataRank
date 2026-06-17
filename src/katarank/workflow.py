@@ -42,6 +42,29 @@ _log = logging.getLogger(__name__)
 _KAB2_CACHE_DIR: Optional[Path] = None
 
 
+def _sgf_hash(sgf: str) -> str:
+    """Stable hash of SGF content for cache keying."""
+    import hashlib
+    return hashlib.md5(sgf.encode('utf-8', errors='replace')).hexdigest()[:16]
+
+
+def _inject_sgf_ids(stream, strings: List[str],
+                     game_ids: Optional[List[str]] = None):
+    """Replace _string_NNN game_ids with explicit IDs or stable SGF hashes."""
+    id_map = {}
+    for i, s in enumerate(strings):
+        auto_id = f'_string_{i:06d}'
+        if game_ids and i < len(game_ids) and game_ids[i]:
+            id_map[auto_id] = game_ids[i]
+        else:
+            id_map[auto_id] = f's_{_sgf_hash(s)}'
+    for side, moves, info in stream:
+        gid = info.get('game_id', '')
+        if gid in id_map:
+            info['game_id'] = id_map[gid]
+        yield side, moves, info
+
+
 def set_kab2_cache_dir(path: Optional[str]):
     """Enable opportunistic caching of KAB2 frames during inference.
 
@@ -63,7 +86,7 @@ def _cache_kab2_frames(game_id: str, moves_b: np.ndarray, moves_w: np.ndarray,
     """Write B+W KAB2 frames to cache if caching is enabled and game not cached."""
     if _KAB2_CACHE_DIR is None:
         return
-    if not game_id or game_id.startswith('_string_'):
+    if not game_id:
         return
     out = _KAB2_CACHE_DIR / f"{game_id}.npz"
     if out.exists():
@@ -430,19 +453,19 @@ def run_rank_files(
 def run_rank_strings(
     engine, inf_workflow: Optional[InferenceWorkflow],
     strings: List[str], mode: str = 'lite', min_moves: int = 10,
+    game_ids: Optional[List[str]] = None,
 ) -> List[KAB2Output]:
     """Rank SGF strings: model inference if a workflow is given, engine stats otherwise.
 
-    KAB2Output.metadata is populated from the SGF headers; string inputs are
-    matched back via the deterministic '_string_NNNNNN' game ids.
+    When game_ids are provided, they are used as cache keys (matching DB UUIDs).
+    Otherwise, SGF content hashes are used as stable fallback keys.
     """
     if inf_workflow is not None:
         rr = inf_workflow.rank_strings(strings, mode=mode, min_moves=min_moves)
         outputs = [result_to_output(r) for r in rr]
     else:
-        outputs = engine_stats_outputs(
-            engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves)
-        )
+        stream = engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves)
+        outputs = engine_stats_outputs(_inject_sgf_ids(stream, strings, game_ids))
     _attach_metadata_from_strings(outputs, strings)
     return outputs
 
@@ -544,16 +567,16 @@ def run_review_strings(
     strings: List[str], mode: str = 'lite', min_moves: int = 10,
     include_ownership: bool = False,
     analysis_daemon=None,
+    game_ids: Optional[List[str]] = None,
 ) -> List[ReviewOutput]:
     """Review SGF strings: whole-game verdict + per-move records, one engine pass.
 
-    When include_ownership=True, fetches ownership (361 floats per position)
-    and attaches it to MoveRecord.ownership. Uses analysis_daemon when
-    provided (persistent process, no model reload); otherwise falls back to a
-    one-shot subprocess. Stream/online mode only — never persisted.
+    When game_ids are provided, they are used as cache keys (matching DB UUIDs).
+    Otherwise, SGF content hashes are used as stable fallback keys.
     """
+    stream = engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves)
     outputs = _review_from_stream(
-        engine.stream_games(sgf_strings=strings, mode=mode, min_moves=min_moves),
+        _inject_sgf_ids(stream, strings, game_ids),
         inf_workflow,
     )
     _attach_metadata_from_strings(outputs, strings)
