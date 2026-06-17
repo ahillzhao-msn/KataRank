@@ -373,9 +373,17 @@ def engine_stats_outputs(stream: Iterable) -> List[KAB2Output]:
     model-based confidence in result_to_output().
     """
     games: Dict[str, KAB2Output] = {}
+    moves_buf: Dict[str, Dict] = {}  # gid → {'B': (moves, info), 'W': (moves, info)}
     order: List[str] = []
     for side, _moves, info in stream:
         gid = info.get('game_id') or f'game_{len(order):04d}'
+        if gid not in moves_buf:
+            moves_buf[gid] = {}
+        moves_buf[gid][side] = (_moves, info)
+        if len(moves_buf[gid]) == 2:
+            bm, bi = moves_buf[gid].get('B', (np.zeros((0, _moves.shape[1]), dtype=np.float32), {}))
+            wm, wi = moves_buf[gid].get('W', (np.zeros((0, _moves.shape[1]), dtype=np.float32), {}))
+            _cache_kab2_frames(gid, bm, wm, bi, wi)
         if gid not in games:
             games[gid] = KAB2Output(
                 game_id=gid,

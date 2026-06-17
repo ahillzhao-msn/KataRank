@@ -1,81 +1,95 @@
 <#
 .SYNOPSIS
-    Start the KataRank API server in the background (if not already running).
+    Start/stop the KataRank API server headless (no terminal window).
 
 .DESCRIPTION
-    Designed to be called from WSL/GoPredict via Windows interop:
-        powershell.exe -NonInteractive -File "C:\path\to\katarank\scripts\start-katarank.ps1"
+    All settings come from ~/.katarank/server.toml.
 
-    - If the server is already up (health check passes), exits immediately.
-    - Otherwise launches katarank-server as a background job with logs
-      written to logs\katarank-stdout.log / katarank-stderr.log.
-    - All settings come from ~/.katarank/server.toml — no args needed.
+    Usage:
+        .\scripts\start-katarank.ps1            # start
+        .\scripts\start-katarank.ps1 -Stop      # stop
+        .\scripts\start-katarank.ps1 -Restart    # restart (reload new code)
 #>
 
+param(
+    [switch]$Stop,
+    [switch]$Restart
+)
+
 $ErrorActionPreference = "Stop"
-
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$Port = 8765   # must match server.toml [katarank] port
+$Port = 8765
 
-# ── Already running? ──────────────────────────────────────────────────────────
-try {
-    $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" `
-                              -TimeoutSec 3 -ErrorAction Stop
-    if ($resp.status -eq "ok" -or $resp.status -eq "degraded") {
-        Write-Host "KataRank already running (status: $($resp.status))"
-        exit 0
+function Test-ServerUp {
+    try {
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:${Port}/health" -TimeoutSec 3 -ErrorAction Stop
+        return ($r.status -eq "ok" -or $r.status -eq "degraded")
+    } catch {
+        return $false
     }
-} catch {
-    # Not up — continue to start it
 }
 
-# ── Launch ────────────────────────────────────────────────────────────────────
-$LogDir = Join-Path $ProjectRoot "logs"
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
-
-$Stdout = Join-Path $LogDir "katarank-stdout.log"
-$Stderr = Join-Path $LogDir "katarank-stderr.log"
-$Launcher = Join-Path $ProjectRoot ".venv\Scripts\katarank-server.exe"
-
-if (-not (Test-Path $Launcher)) {
-    $Launcher = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-    $LaunchArgs = "-m katarank.api.server"
-} else {
-    $LaunchArgs = ""
+function Stop-KataRank {
+    $procs = Get-Process -Name "katarank-server" -ErrorAction SilentlyContinue
+    if ($procs) {
+        $procs | Stop-Process -Force -Confirm:$false
+        Write-Host "Stopped katarank-server (pid $($procs.Id -join ', '))"
+    } else {
+        Write-Host "No katarank-server process found"
+    }
+    Start-Sleep -Seconds 2
 }
 
-if (-not (Test-Path $Launcher)) {
+if ($Stop) {
+    Stop-KataRank
+    exit 0
+}
+
+if ($Restart) {
+    Write-Host "Restarting..."
+    Stop-KataRank
+}
+elseif (Test-ServerUp) {
+    Write-Host "KataRank already running on port $Port"
+    exit 0
+}
+
+# ---- Find launcher ----
+$ServerExe = Join-Path $ProjectRoot ".venv\Scripts\katarank-server.exe"
+if (-not (Test-Path $ServerExe)) {
     Write-Error "katarank not installed. Run: uv sync --extra api"
     exit 1
 }
 
+# ---- Prepare logs ----
+$LogDir = Join-Path $ProjectRoot "logs"
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+$StdoutLog = Join-Path $LogDir "katarank-stdout.log"
+$StderrLog = Join-Path $LogDir "katarank-stderr.log"
+
+# ---- Launch headless ----
 Write-Host "Starting KataRank server..."
-$proc = Start-Process -FilePath $Launcher `
-    -ArgumentList $LaunchArgs `
+$proc = Start-Process -FilePath $ServerExe `
     -WorkingDirectory $ProjectRoot `
-    -RedirectStandardOutput $Stdout `
-    -RedirectStandardError  $Stderr `
+    -RedirectStandardOutput $StdoutLog `
+    -RedirectStandardError  $StderrLog `
     -WindowStyle Hidden `
     -PassThru
 
-Write-Host "Launched (pid $($proc.Id)) — waiting for health check..."
+Write-Host "Launched (pid $($proc.Id)). Waiting for health check..."
 
-# ── Wait up to 60 s for the server to be ready ────────────────────────────────
-$deadline = (Get-Date).AddSeconds(60)
-while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 2
-    try {
-        $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" `
-                                  -TimeoutSec 3 -ErrorAction Stop
-        Write-Host "KataRank ready (status: $($resp.status))"
+# ---- Wait for ready ----
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 3
+    if (Test-ServerUp) {
+        Write-Host "KataRank ready on port $Port (pid $($proc.Id))" -ForegroundColor Green
         exit 0
-    } catch { }
-
+    }
     if ($proc.HasExited) {
-        Write-Error "KataRank process exited unexpectedly. Check: $Stderr"
+        Write-Host "Process exited (code $($proc.ExitCode)). Check: $StderrLog" -ForegroundColor Red
         exit 1
     }
 }
 
-Write-Error "KataRank did not become ready within 60 s. Check: $Stderr"
+Write-Host "Server did not become ready within 90s. Check: $StderrLog" -ForegroundColor Yellow
 exit 1
