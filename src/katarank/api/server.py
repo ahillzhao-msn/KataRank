@@ -239,11 +239,8 @@ def create_app(
         lifespan=_lifespan,
     )
 
-    # Enable opportunistic KAB2 caching — any game analyzed online is
-    # automatically saved to cache, avoiding duplicate batch_analysis runs.
-    from katarank.workflow import set_kab2_cache_dir
-    if kab2_cache:
-        set_kab2_cache_dir(kab2_cache)
+    # KAB2 caching is owned by GoPredict DAL (persist_analysis dual-write).
+    # KataRank server does not cache — it only serves algorithm results.
 
     # Load rank model if checkpoint given
     inf_workflow: Optional[InferenceWorkflow] = None

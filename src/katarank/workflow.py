@@ -38,68 +38,49 @@ from katarank.schema import (
 _log = logging.getLogger(__name__)
 
 # ─── Opportunistic KAB2 caching ─────────────────────────────────────────────
+# Cache logic lives in GOPredict's DAL (GameAnalysisDAL.cache_kab2).
+# KataRank workflow accepts an injectable callable for zero coupling.
 
-_KAB2_CACHE_DIR: Optional[Path] = None
+_kab2_cache_fn: Optional[Callable] = None
 
 
-def _sgf_hash(sgf: str) -> str:
-    """Stable hash of SGF content for cache keying."""
-    import hashlib
-    return hashlib.md5(sgf.encode('utf-8', errors='replace')).hexdigest()[:16]
+def set_kab2_cache_fn(fn: Optional[Callable]):
+    """Inject a cache function: fn(game_id, moves_b, moves_w, info_b, info_w).
+
+    Called by KataRank server startup to wire in the DAL's cache_kab2.
+    Pass None to disable caching (pure streaming).
+    """
+    global _kab2_cache_fn
+    _kab2_cache_fn = fn
+
+
+def _cache_kab2_frames(game_id: str, moves_b: np.ndarray, moves_w: np.ndarray,
+                       info_b: dict, info_w: dict):
+    """Delegate to injected cache function if available."""
+    if _kab2_cache_fn and game_id:
+        try:
+            _kab2_cache_fn(game_id, moves_b, moves_w, info_b, info_w)
+        except Exception as e:
+            _log.debug("KAB2 cache failed for %s: %s", game_id, e)
 
 
 def _inject_sgf_ids(stream, strings: List[str],
                      game_ids: Optional[List[str]] = None):
     """Replace _string_NNN game_ids with explicit IDs or stable SGF hashes."""
+    import hashlib
     id_map = {}
     for i, s in enumerate(strings):
         auto_id = f'_string_{i:06d}'
         if game_ids and i < len(game_ids) and game_ids[i]:
             id_map[auto_id] = game_ids[i]
         else:
-            id_map[auto_id] = f's_{_sgf_hash(s)}'
+            h = hashlib.md5(s.encode('utf-8', errors='replace')).hexdigest()[:16]
+            id_map[auto_id] = f's_{h}'
     for side, moves, info in stream:
         gid = info.get('game_id', '')
         if gid in id_map:
             info['game_id'] = id_map[gid]
         yield side, moves, info
-
-
-def set_kab2_cache_dir(path: Optional[str]):
-    """Enable opportunistic caching of KAB2 frames during inference.
-
-    When set, any game processed through run_rank_*/run_review_* will
-    have its raw KAB2 frames written to this directory as combined .npz,
-    matching the format produced by ``katago batch_analysis --file-mode``.
-    Games already cached are skipped.
-    """
-    global _KAB2_CACHE_DIR
-    if path is None:
-        _KAB2_CACHE_DIR = None
-    else:
-        _KAB2_CACHE_DIR = Path(path)
-        _KAB2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _cache_kab2_frames(game_id: str, moves_b: np.ndarray, moves_w: np.ndarray,
-                       info_b: dict, info_w: dict):
-    """Write B+W KAB2 frames to cache if caching is enabled and game not cached."""
-    if _KAB2_CACHE_DIR is None:
-        return
-    if not game_id:
-        return
-    out = _KAB2_CACHE_DIR / f"{game_id}.npz"
-    if out.exists():
-        return
-    try:
-        from katarank.engine import build_kab2_payload
-        b_payload = build_kab2_payload(moves_b, info_b) if len(moves_b) > 0 else b''
-        w_payload = build_kab2_payload(moves_w, info_w) if len(moves_w) > 0 else b''
-        data = (struct.pack('<I', len(b_payload)) + b_payload
-                + struct.pack('<I', len(w_payload)) + w_payload)
-        out.write_bytes(data)
-    except Exception as e:
-        _log.debug("KAB2 cache write failed for %s: %s", game_id, e)
 
 
 # ─── Inference result type ────────────────────────────────────────────────────
