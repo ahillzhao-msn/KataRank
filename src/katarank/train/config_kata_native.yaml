@@ -27,7 +27,7 @@ training:
 
   stratified: true           # NEW: rank-stratified batch sampling
   n_bands: 5                 # 5 rank bands (~6 ranks each)
-
+  num_workers: 2             # parallel data loading for GPU efficiency
   max_moves: 400             # truncate long sequences (keep last N)
   min_moves: 5               # skip players with fewer moves
 
