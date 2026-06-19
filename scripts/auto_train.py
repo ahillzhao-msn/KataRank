@@ -135,6 +135,111 @@ def merge_meta(cache_dir: Path, new_dir: Path) -> int:
     return len(all_rows)
 
 
+_RANK_NAMES = [
+    '20k','19k','18k','17k','16k','15k','14k','13k','12k','11k',
+    '10k','9k','8k','7k','6k','5k','4k','3k','2k','1k',
+    '1d','2d','3d','4d','5d','6d','7d','8d','9d',
+]
+
+_META_FIELDNAMES = [
+    "file", "black", "white", "black_elo", "white_elo",
+    "total_moves", "black_moves", "white_moves", "set",
+    "B_acc1", "B_acc3", "B_logPrior", "B_winRate", "B_scoreLead",
+    "B_complexity", "B_scoreVar", "B_drop", "B_humanRank", "B_humanLogPrior",
+    "W_acc1", "W_acc3", "W_logPrior", "W_winRate", "W_scoreLead",
+    "W_complexity", "W_scoreVar", "W_drop", "W_humanRank", "W_humanLogPrior",
+]
+
+
+def _rank_idx_to_str(idx: int) -> str:
+    if 0 <= idx < len(_RANK_NAMES):
+        return f"rank_{_RANK_NAMES[idx]}"
+    return ""
+
+
+def _info_to_meta_fields(info: dict, prefix: str) -> dict:
+    """Extract _meta.csv columns from a KAB2 info dict (one side)."""
+    summary = info.get("summary", (0.0,) * 16)
+    rank_idx = info.get("human_rank_idx", -1)
+    n = info.get("num_moves", 0)
+    return {
+        f"{prefix}_acc1":          round(summary[0], 6) if len(summary) > 0 else 0,
+        f"{prefix}_acc3":          round(summary[1], 6) if len(summary) > 1 else 0,
+        f"{prefix}_logPrior":      round(info.get("mean_log_prior", 0.0), 6),
+        f"{prefix}_winRate":       round(summary[3], 6) if len(summary) > 3 else 0,
+        f"{prefix}_scoreLead":     round(summary[4], 6) if len(summary) > 4 else 0,
+        f"{prefix}_complexity":    round(summary[5], 6) if len(summary) > 5 else 0,
+        f"{prefix}_scoreVar":      round(summary[6], 6) if len(summary) > 6 else 0,
+        f"{prefix}_drop":          round(summary[7], 6) if len(summary) > 7 else 0,
+        f"{prefix}_humanRank":     _rank_idx_to_str(rank_idx),
+        f"{prefix}_humanLogPrior": round(info.get("human_log_prior", 0.0), 6),
+        f"__{prefix}_moves":       n,
+    }
+
+
+def rebuild_meta(cache_dir: Path) -> int:
+    """Rebuild _meta.csv from .npz files, filling in rows for orphaned files."""
+    from katarank.data.preprocess import read_kab2_combined
+
+    existing_rows = load_cached_meta(cache_dir)
+    existing_ids = {r["file"] for r in existing_rows}
+
+    all_npz = sorted(cache_dir.glob("*.npz"))
+    orphans = [p for p in all_npz if p.stem not in existing_ids]
+
+    if not orphans:
+        log.info("rebuild_meta: all %d .npz files already in _meta.csv", len(all_npz))
+        return len(existing_rows)
+
+    log.info("rebuild_meta: %d existing rows, %d orphaned .npz to scan",
+             len(existing_rows), len(orphans))
+
+    new_rows = []
+    errors = 0
+    for npz_path in orphans:
+        try:
+            b_moves, w_moves, b_info, w_info = read_kab2_combined(str(npz_path))
+        except Exception as e:
+            log.warning("Failed to read %s: %s", npz_path.name, e)
+            errors += 1
+            continue
+
+        b_n = b_info.get("num_moves", 0) if b_info else 0
+        w_n = w_info.get("num_moves", 0) if w_info else 0
+        b_fields = _info_to_meta_fields(b_info, "B") if b_info else {}
+        w_fields = _info_to_meta_fields(w_info, "W") if w_info else {}
+
+        row = {
+            "file":        npz_path.stem,
+            "black":       "unknown",
+            "white":       "unknown",
+            "black_elo":   1500,
+            "white_elo":   1500,
+            "total_moves": b_n + w_n,
+            "black_moves": b_n,
+            "white_moves": w_n,
+            "set":         "",
+        }
+        for k, v in b_fields.items():
+            if not k.startswith("__"):
+                row[k] = v
+        for k, v in w_fields.items():
+            if not k.startswith("__"):
+                row[k] = v
+        new_rows.append(row)
+
+    all_rows = existing_rows + new_rows
+    meta_out = cache_dir / "_meta.csv"
+    with meta_out.open("w", encoding="utf-8", newline="") as f:
+        writer = csvmod.DictWriter(f, fieldnames=_META_FIELDNAMES, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    log.info("rebuild_meta: wrote %d rows (%d new, %d errors)",
+             len(all_rows), len(new_rows), errors)
+    return len(all_rows)
+
+
 def copy_new_npz(new_dir: Path, cache_dir: Path) -> int:
     """Copy .npz files from new_dir to cache_dir. Returns count copied."""
     n = 0
@@ -312,11 +417,14 @@ def record_training_run(conn, ckpt_path: Path, num_games: int, metrics: dict | N
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO model_versions
-                (version, artifact_path, num_training_games, metrics, active, created_at)
-            VALUES (%s, %s, %s, %s, true, now())
+                (version, artifact_path, architecture, feature_version,
+                 num_training_games, metrics, active, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, true, now())
         """, (
             version,
             str(ckpt_path),
+            "transformer",
+            "kab2-v3",
             num_games,
             json.dumps(metrics or {}),
         ))
@@ -347,6 +455,8 @@ def main():
                         help="PostgreSQL connection string")
     parser.add_argument("--resume", default=None,
                         help="Resume training from this checkpoint")
+    parser.add_argument("--rebuild-meta", action="store_true",
+                        help="Rebuild _meta.csv from .npz files (recover orphaned entries)")
     parser.add_argument("--rebuild-cache", action="store_true",
                         help="Wipe KAB2 cache and regenerate all from scratch")
     parser.add_argument("--cache-dir", type=Path, default=KAB2_CACHE,
@@ -362,6 +472,12 @@ def main():
         log.info("Rebuilding cache: wiping %s", cache_dir)
         shutil.rmtree(cache_dir, ignore_errors=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.rebuild_meta:
+        n = rebuild_meta(cache_dir)
+        assign_train_val_split(cache_dir)
+        log.info("rebuild-meta complete: %d total rows, T/V split assigned", n)
+        return
 
     log.info("Connecting to GoPredict DB...")
     conn = psycopg2.connect(args.db_dsn)
@@ -421,8 +537,11 @@ def main():
         else:
             log.info("All games already cached — skipping KAB2 generation")
 
-        # ── Step 4: Assign T/V split on full cache ──────────────────────────
-        log.info("=== Step 4/5: Preparing T/V split ===")
+        # ── Step 4: Rebuild _meta.csv + T/V split ──────────────────────────
+        # _meta.csv is a derived artifact: online analysis caches .npz without
+        # updating it, so always rebuild from .npz before training.
+        log.info("=== Step 4/5: Rebuilding _meta.csv + T/V split ===")
+        rebuild_meta(cache_dir)
         assign_train_val_split(cache_dir)
 
         # ── Step 5: Train ───────────────────────────────────────────────────

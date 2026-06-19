@@ -32,8 +32,8 @@ def main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from auto_train import (
         get_cached_game_ids, get_analyzed_game_ids, export_sgfs_by_ids,
-        generate_kab2, copy_new_npz, merge_meta, assign_train_val_split,
-        _load_katago_config,
+        generate_kab2, copy_new_npz, merge_meta, rebuild_meta,
+        assign_train_val_split, _load_katago_config,
     )
     import psycopg2
 
@@ -87,7 +87,8 @@ def main():
 
         log.info("=== All done: generated %d new KAB2 files ===", total_generated)
 
-        log.info("Assigning T/V split...")
+        log.info("Rebuilding _meta.csv from all .npz files...")
+        rebuild_meta(cache_dir)
         assign_train_val_split(cache_dir)
 
         final_count = len(list(cache_dir.glob("*.npz")))
