@@ -411,29 +411,71 @@ def run_training(kab2_dir: Path, resume_from: str | None = None) -> Path:
 
 # ── Record to GoPredict DB ──────────────────────────────────────────────────
 
-def record_training_run(conn, ckpt_path: Path, num_games: int, metrics: dict | None = None):
+def _load_training_report(ckpt_dir: Path) -> dict | None:
+    """Read training_report.json next to the checkpoint."""
+    report = ckpt_dir / "training_report.json"
+    if not report.exists():
+        return None
+    return json.loads(report.read_text(encoding="utf-8"))
+
+
+def _git_commit() -> str:
+    """Current HEAD short hash, or empty."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def record_training_run(conn, ckpt_path: Path, num_games: int):
     """Insert a row into model_versions in GoPredict's DB."""
     version = f"v{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+
+    report = _load_training_report(ckpt_path.parent)
+    if report:
+        fm = report.get("final_metrics", {})
+        metrics = {
+            "rank_mae": fm.get("rank_mae"),
+            "rank_acc": fm.get("rank_acc"),
+            "rank_acc_pm1": fm.get("rank_acc_pm1"),
+            "rating_corr": fm.get("rating_corr"),
+            "best_val_loss": report.get("best_val_loss"),
+            "epochs_trained": report.get("epochs_trained"),
+            "best_epoch": report.get("best_epoch"),
+            "elapsed_seconds": report.get("elapsed_seconds"),
+        }
+        notes = (f"train={report.get('data', {}).get('train_games', '?')} "
+                 f"val={report.get('data', {}).get('val_games', '?')} "
+                 f"early_stopped={report.get('early_stopped', '?')}")
+    else:
+        metrics = {}
+        notes = ""
+
+    commit = _git_commit()
+
     with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE model_versions SET active = false WHERE active = true
+        """)
         cur.execute("""
             INSERT INTO model_versions
                 (version, artifact_path, architecture, feature_version,
-                 num_training_games, metrics, active, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, true, now())
+                 num_training_games, metrics, git_commit, notes, active, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true, now())
         """, (
             version,
             str(ckpt_path),
             "transformer",
             "kab2-v3",
             num_games,
-            json.dumps(metrics or {}),
+            json.dumps(metrics),
+            commit,
+            notes,
         ))
-        cur.execute("""
-            UPDATE model_versions SET active = false
-            WHERE version != %s
-        """, (version,))
     conn.commit()
-    log.info("Recorded model version %s (%d games)", version, num_games)
+    log.info("Recorded model version %s (%d games, metrics=%s)", version, num_games, metrics)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -455,6 +497,8 @@ def main():
                         help="PostgreSQL connection string")
     parser.add_argument("--resume", default=None,
                         help="Resume training from this checkpoint")
+    parser.add_argument("--register", action="store_true",
+                        help="Register existing checkpoint to model_versions (no training)")
     parser.add_argument("--rebuild-meta", action="store_true",
                         help="Rebuild _meta.csv from .npz files (recover orphaned entries)")
     parser.add_argument("--rebuild-cache", action="store_true",
@@ -477,6 +521,20 @@ def main():
         n = rebuild_meta(cache_dir)
         assign_train_val_split(cache_dir)
         log.info("rebuild-meta complete: %d total rows, T/V split assigned", n)
+        return
+
+    if args.register:
+        ckpt = PROJECT_ROOT / "nets" / "katarank" / "best.pt"
+        if not ckpt.exists():
+            log.error("No checkpoint at %s", ckpt)
+            return
+        n_cached = len(get_cached_game_ids(cache_dir))
+        log.info("Registering existing checkpoint %s (%d cached games)", ckpt, n_cached)
+        conn = psycopg2.connect(args.db_dsn)
+        try:
+            record_training_run(conn, ckpt, n_cached)
+        finally:
+            conn.close()
         return
 
     log.info("Connecting to GoPredict DB...")
