@@ -98,13 +98,16 @@ def get_cached_game_ids(cache_dir: Path) -> set[str]:
 
 
 def purge_lite_npz(cache_dir: Path, dry_run: bool = False) -> int:
-    """Delete .npz files that only contain lite (scalar-only) features.
+    """Move lite-only .npz to a sibling _lite/ directory for future distillation use.
 
     Lite files have trunk_dim=0 in their KAB2 header; full files have
-    trunk_dim>0. Returns count of files removed.
+    trunk_dim>0. Returns count of files moved.
     """
     import struct as st
-    removed = 0
+    lite_dir = cache_dir / "_lite"
+    if not dry_run:
+        lite_dir.mkdir(exist_ok=True)
+    moved = 0
     for p in cache_dir.glob("*.npz"):
         try:
             with open(p, "rb") as f:
@@ -118,13 +121,13 @@ def purge_lite_npz(cache_dir: Path, dry_run: bool = False) -> int:
                 trunk_dim = st.unpack("<i", f.read(4))[0]
             if trunk_dim == 0:
                 if not dry_run:
-                    p.unlink()
-                removed += 1
+                    p.rename(lite_dir / p.name)
+                moved += 1
         except Exception:
             continue
-    log.info("purge_lite_npz: %s %d lite files",
-             "would remove" if dry_run else "removed", removed)
-    return removed
+    log.info("purge_lite_npz: %s %d lite files → %s",
+             "would move" if dry_run else "moved", moved, lite_dir)
+    return moved
 
 
 def load_cached_meta(cache_dir: Path) -> list[dict]:
