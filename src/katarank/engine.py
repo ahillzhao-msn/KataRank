@@ -475,6 +475,7 @@ class KataGoEngine:
         mode: str = 'full',
         min_moves: int = 10,
         max_games: int = 0,
+        max_visits: int = 0,
     ) -> int:
         """
         Run batch_analysis writing one combined <stem>.npz per game to
@@ -487,6 +488,8 @@ class KataGoEngine:
             sgf_strings: List of SGF content strings.
             sgf_dir:     Directory to scan for .sgf files.
             csv:         Path to a pre-made CSV list file.
+            max_visits:  Override visits per move (0 = engine default).
+                         For feature extraction, 1 is sufficient.
 
         Returns:
             Exit code (0 = success).
@@ -504,6 +507,8 @@ class KataGoEngine:
             cmd.append('-no-trunk')
         if max_games > 0:
             cmd += ['-max-games', str(max_games)]
+        if max_visits > 0:
+            cmd += ['-visits', str(max_visits)]
 
         result = subprocess.run(cmd)
         if tmp is not None:

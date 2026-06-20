@@ -335,7 +335,8 @@ def export_sgfs_by_ids(conn, game_ids: set[str], output_dir: Path) -> int:
 
 # ── KAB2 generation ─────────────────────────────────────────────────────────
 
-def generate_kab2(sgf_dir: Path, output_dir: Path, katago_cfg: dict) -> int:
+def generate_kab2(sgf_dir: Path, output_dir: Path, katago_cfg: dict,
+                   max_visits: int = 1) -> int:
     """Run KataGoEngine.batch_to_files() to produce .npz + _meta.csv."""
     from katarank.engine import KataGoEngine
 
@@ -354,12 +355,13 @@ def generate_kab2(sgf_dir: Path, output_dir: Path, katago_cfg: dict) -> int:
     )
 
     sgf_paths = sorted(sgf_dir.glob("*.sgf"))
-    log.info("Generating KAB2 for %d SGFs → %s", len(sgf_paths), output_dir)
+    log.info("Generating KAB2 for %d SGFs → %s (visits=%d)", len(sgf_paths), output_dir, max_visits)
 
     rc = engine.batch_to_files(
         output_dir=str(output_dir),
         sgf_paths=[str(p) for p in sgf_paths],
         mode="full",
+        max_visits=max_visits,
     )
     if rc != 0:
         raise RuntimeError(f"katago batch_analysis failed (exit code {rc})")
