@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=500,
                         help="Process SGFs in chunks of this size")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--upgrade-lite", action="store_true",
+                        help="Delete lite-only .npz files first so they get regenerated as full")
     args = parser.parse_args()
 
     import sys
@@ -33,13 +35,17 @@ def main():
     from auto_train import (
         get_cached_game_ids, get_analyzed_game_ids, export_sgfs_by_ids,
         generate_kab2, copy_new_npz, merge_meta, rebuild_meta,
-        assign_train_val_split, _load_katago_config,
+        assign_train_val_split, _load_katago_config, purge_lite_npz,
     )
     import psycopg2
 
     cache_dir = args.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     katago_cfg = _load_katago_config()
+
+    if args.upgrade_lite:
+        n = purge_lite_npz(cache_dir, dry_run=args.dry_run)
+        log.info("Purged %d lite .npz files — they will be regenerated as full", n)
 
     conn = psycopg2.connect(args.db_dsn)
     try:

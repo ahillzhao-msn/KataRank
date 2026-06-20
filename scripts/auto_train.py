@@ -97,6 +97,36 @@ def get_cached_game_ids(cache_dir: Path) -> set[str]:
     return {p.stem for p in cache_dir.glob("*.npz")}
 
 
+def purge_lite_npz(cache_dir: Path, dry_run: bool = False) -> int:
+    """Delete .npz files that only contain lite (scalar-only) features.
+
+    Lite files have trunk_dim=0 in their KAB2 header; full files have
+    trunk_dim>0. Returns count of files removed.
+    """
+    import struct as st
+    removed = 0
+    for p in cache_dir.glob("*.npz"):
+        try:
+            with open(p, "rb") as f:
+                b_sz = st.unpack("<I", f.read(4))[0]
+                if b_sz < 20:
+                    continue
+                magic = f.read(4)
+                if magic != b"KAB2":
+                    continue
+                f.read(8)  # num_moves + scalar_dim
+                trunk_dim = st.unpack("<i", f.read(4))[0]
+            if trunk_dim == 0:
+                if not dry_run:
+                    p.unlink()
+                removed += 1
+        except Exception:
+            continue
+    log.info("purge_lite_npz: %s %d lite files",
+             "would remove" if dry_run else "removed", removed)
+    return removed
+
+
 def load_cached_meta(cache_dir: Path) -> list[dict]:
     """Load _meta.csv from cache, returns empty list if absent."""
     meta = cache_dir / "_meta.csv"
