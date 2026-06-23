@@ -134,6 +134,7 @@ if _FASTAPI_AVAILABLE:
 def create_app(
     katago_model: str,
     checkpoint_path: Optional[str] = None,
+    checkpoint_lite: Optional[str] = None,
     katago_bin: Optional[str] = None,
     katago_config: Optional[str] = None,
     human_model: Optional[str] = None,
@@ -149,7 +150,8 @@ def create_app(
 
     Args:
         katago_model:    Path to KataGo model (.bin.gz)
-        checkpoint_path: Optional KataRankModel checkpoint (.pt)
+        checkpoint_path: Full KataRankModel checkpoint (.pt, input_dim=1034)
+        checkpoint_lite: Lite KataRankModel checkpoint (.pt, input_dim=10)
         katago_bin:      KataGo binary; auto-detected if None
         device:          'cpu', 'cuda', or None for auto
         max_concurrency: Max simultaneous katago analyses (default 1 = serialize)
@@ -251,12 +253,20 @@ def create_app(
     # KAB2 caching is owned by GoPredict DAL (persist_analysis dual-write).
     # KataRank server does not cache — it only serves algorithm results.
 
-    # Load rank model if checkpoint given
-    inf_workflow: Optional[InferenceWorkflow] = None
+    # Load rank models — supports dual checkpoints (full + lite)
+    from katarank.model import KataRankModel  # type: ignore
+    _workflows: dict[str, InferenceWorkflow] = {}
     if checkpoint_path:
-        from katarank.model import KataRankModel  # type: ignore
-        rank_model = KataRankModel.load(checkpoint_path)
-        inf_workflow = InferenceWorkflow(rank_model, engine, device=device)
+        _workflows['full'] = InferenceWorkflow(
+            KataRankModel.load(checkpoint_path), engine, device=device)
+        logger.info('Loaded full model from %s', checkpoint_path)
+    if checkpoint_lite:
+        _workflows['lite'] = InferenceWorkflow(
+            KataRankModel.load(checkpoint_lite), engine, device=device)
+        logger.info('Loaded lite model from %s', checkpoint_lite)
+
+    def _get_workflow(mode: str) -> Optional[InferenceWorkflow]:
+        return _workflows.get(mode) or next(iter(_workflows.values()), None)
 
     # Serialize katago runs: each analysis spawns a GPU-bound subprocess,
     # so unbounded concurrency would thrash the device.
@@ -289,7 +299,9 @@ def create_app(
         ok = batch_alive and analysis_alive
         return {
             'status':              'ok' if ok else 'degraded',
-            'model_loaded':        inf_workflow is not None,
+            'model_loaded':        bool(_workflows),
+            'models':              list(_workflows.keys()),
+            'engine_mode':         engine_mode,
             'engine_persistent':   persistent,
             'engine_ready':        batch_alive,
             'analysis_daemon_ready': analysis_alive,
@@ -329,7 +341,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_strings(
-                    engine, inf_workflow, [req.sgf], _resolve_mode(req.mode), req.min_moves,
+                    engine, _get_workflow(_resolve_mode(req.mode)), [req.sgf], _resolve_mode(req.mode), req.min_moves,
                     game_ids=[req.game_id] if req.game_id else None,
                 )
         except Exception as e:
@@ -348,7 +360,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_files(
-                    engine, inf_workflow, [req.path], _resolve_mode(req.mode), req.min_moves
+                    engine, _get_workflow(_resolve_mode(req.mode)), [req.path], _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -364,7 +376,7 @@ def create_app(
             if req.item_type == 'string':
                 with engine_sem:
                     results = _run_rank_strings(
-                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
+                        engine, _get_workflow(_resolve_mode(req.mode)), req.items, _resolve_mode(req.mode), req.min_moves
                     )
             else:
                 for p in req.items:
@@ -377,7 +389,7 @@ def create_app(
                     )
                 with engine_sem:
                     results = _run_rank_files(
-                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
+                        engine, _get_workflow(_resolve_mode(req.mode)), req.items, _resolve_mode(req.mode), req.min_moves
                     )
         except HTTPException:
             raise
@@ -396,7 +408,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_review_strings(
-                    engine, inf_workflow, [req.sgf], _resolve_mode(req.mode), req.min_moves,
+                    engine, _get_workflow(_resolve_mode(req.mode)), [req.sgf], _resolve_mode(req.mode), req.min_moves,
                     include_ownership=req.include_ownership,
                     analysis_daemon=analysis_daemon if req.include_ownership else None,
                     game_ids=[req.game_id] if req.game_id else None,
@@ -417,7 +429,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_review_files(
-                    engine, inf_workflow, [req.path], _resolve_mode(req.mode), req.min_moves
+                    engine, _get_workflow(_resolve_mode(req.mode)), [req.path], _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -433,7 +445,7 @@ def create_app(
             if req.item_type == 'string':
                 with engine_sem:
                     results = _run_review_strings(
-                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
+                        engine, _get_workflow(_resolve_mode(req.mode)), req.items, _resolve_mode(req.mode), req.min_moves
                     )
             else:
                 for p in req.items:
@@ -446,7 +458,7 @@ def create_app(
                     )
                 with engine_sem:
                     results = _run_review_files(
-                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
+                        engine, _get_workflow(_resolve_mode(req.mode)), req.items, _resolve_mode(req.mode), req.min_moves
                     )
         except HTTPException:
             raise
@@ -468,7 +480,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_files(
-                    engine, inf_workflow, sgfs, _resolve_mode(req.mode), req.min_moves
+                    engine, _get_workflow(_resolve_mode(req.mode)), sgfs, _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -572,12 +584,13 @@ _CONFIG_TEMPLATE = """\
 [katarank]
 # model = "C:/Users/you/.katago/models/kata1-b18c384nbt.bin.gz"
 # katago_bin = ""                 # auto-discovered from ~/katago-fork/cpp/
-# checkpoint = ""                 # KataRank .pt checkpoint (optional)
+# checkpoint = ""                 # KataRank full .pt checkpoint (1034-dim)
+# checkpoint_lite = ""            # KataRank lite .pt checkpoint (10-dim, distilled)
 # config = ""                     # KataGo analysis .cfg (auto-generated)
 # human_model = ""                # HumanSL model (optional)
 # host = "127.0.0.1"
 # port = 8765
-# engine_mode = "lite"            # lite | full
+# engine_mode = "lite"            # lite | full — default mode for requests
 # max_concurrency = 1
 # sgf_root = ""                   # restrict file endpoints to this directory
 # device = ""                     # cpu | cuda (auto-detected)
@@ -622,7 +635,8 @@ def main():
         epilog=f'Default config: {_CONFIG_PATH}  (created on first run if absent)',
     )
     parser.add_argument('--model',       default=None,   help='KataGo model .bin.gz (auto-discovered if omitted)')
-    parser.add_argument('--checkpoint',  default=None,   help='KataRankModel .pt')
+    parser.add_argument('--checkpoint',  default=None,   help='Full KataRankModel .pt (1034-dim)')
+    parser.add_argument('--checkpoint-lite', default=None, help='Lite KataRankModel .pt (10-dim, distilled)')
     parser.add_argument('--katago-bin',  default=None,   help='KataGo binary path (auto-discovered if omitted)')
     parser.add_argument('--config',      default=None,   help='KataGo config .cfg (auto-generated if omitted)')
     parser.add_argument('--human-model', default=None,   help='HumanSL model .bin.gz')
@@ -663,6 +677,7 @@ def main():
     app = create_app(
         katago_model    = model,
         checkpoint_path = _get(args.checkpoint,      'checkpoint'),
+        checkpoint_lite = _get(args.checkpoint_lite, 'checkpoint_lite'),
         katago_bin      = _get(args.katago_bin,      'katago_bin'),
         katago_config   = _get(args.config,          'config'),
         human_model     = _get(args.human_model,     'human_model'),
