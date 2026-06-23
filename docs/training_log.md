@@ -135,18 +135,69 @@ Epoch 6-150: Cosine annealing  lr → lr_min (1e-5)
 
 ---
 
+### 2.3 全量 Teacher 训练 (2026-06-22, Phase 2)
+
+**改进措施:**
+- 数据量从 9,394 → 27,223 游戏 (3x 扩大)，全部含 HumanSL 段位标签
+- Warm-start from Phase 1 best.pt
+- 保持 Phase 1 超参不变（验证其可复现性）
+
+**配置:**
+- 数据: 27,223 训练 / 3,022 验证，input_dim=1034
+- 超参: batch_size=32, lr=0.0005, warmup=5, cosine decay → 1e-5, patience=30, epochs=150
+- stratified=true, n_bands=5, num_workers=2
+- 设备: CUDA (RTX 3060)
+
+**训练过程 (精选 epoch):**
+
+| Epoch | Train Loss | Val Loss | LR | 备注 |
+|-------|-----------|----------|-----|------|
+| 1 | 1.0375 | 0.8549 | 5.00e-05 | 起点 ≈ Phase 1 终点 |
+| 5 | 1.0622 | 0.9067 | 4.10e-04 | warmup 峰值抖动 |
+| 13 | 1.0384 | 0.8539 | 4.97e-04 | 首次突破 Phase 1 best |
+| 32 | 0.9984 | 0.8334 | 4.62e-04 | train_loss 破 1.0 |
+| 45 | 0.9776 | 0.8170 | 4.18e-04 | decay 甜区开始 |
+| 66 | 0.9468 | 0.8107 | 3.21e-04 | |
+| 76 | 0.9433 | **0.7998** | 2.68e-04 | **首破 0.80** |
+| 100 | 0.9163 | 0.7874 | 1.45e-04 | |
+| 113 | 0.9076 | 0.7797 | 8.85e-05 | |
+| 128 | 0.8982 | **0.7727** | 3.98e-05 | **best** |
+| 150 | 0.8906 | 0.7781 | 1.01e-05 | 训练结束 |
+
+**最终结果对比:**
+
+| 指标 | Phase 1 (9.4k) | **Phase 2 (27.2k)** | 改善 |
+|------|---------------|---------------------|------|
+| val_loss | 0.8585 | **0.7727** | **-10.0%** |
+| rank_mae | 0.381 | **0.350** | **-8.1%** |
+| rank_acc | 66.6% | **69.0%** | **+2.4pp** |
+| rank_acc_pm1 | 96.1% | **96.4%** | **+0.3pp** |
+| rating_corr | 0.9925 | **0.9949** | **+0.24pp** |
+| best_epoch | 140 | 128 | 更早收敛 |
+| 训练时间 | 25,184s (7.0h) | 47,576s (13.2h) | 数据量 3x |
+| 评估样本量 | 1,140 | 6,044 | +430% |
+
+**关键洞察:**
+1. **3x 数据量的红利充分兑现** — val_loss 降 10%，所有指标改善
+2. **无过拟合** — train-val gap 从 0.183 收窄到 0.118
+3. **150 epoch 跑满无 early stop** — 数据量充足，模型从未停止学习
+4. **rank_acc_pm1 96.4%** — 96% 以上棋谱段位判定在 ±1 段以内
+5. **rating_corr 0.9949** — 与 KataGo meanLogPrior 几乎完美相关
+
+---
+
 ## 3. V2 Lite Model — 知识蒸馏
 
 ### 3.1 动机
 
-当前 full 模型 (input_dim=1034) 依赖 KataGo trunk vectors，推理时需要跑完整的 KataGo 神经网络。V2 lite 模型 (input_dim=10) 仅使用标量特征（winrate, score, policy 等），不需要 trunk vectors，推理速度可提升 5-10 倍。
+Full 模型 (input_dim=1034) 依赖 KataGo trunk vectors，推理时需要跑完整的 KataGo 神经网络。V2 lite 模型 (input_dim=10) 仅使用标量特征（winrate, score, policy 等），不需要 trunk vectors，推理速度可提升 5-10 倍。
 
 **方法: 知识蒸馏 (Knowledge Distillation)**
-- Teacher: 已训练的 full 模型 (1034-dim, 2.26M 参数)
+- Teacher: Phase 2 full 模型 (1034-dim, 2.26M 参数, val_loss=0.7727)
 - Student: lite 模型 (10-dim, 540K 参数, hidden_dim=64)
-- Loss: KL-divergence(student_rank_probs, teacher_rank_probs) + MSE(student_rating, teacher_rating) + 可选 hard label anchor
+- Loss: KL-divergence(student_rank_probs, teacher_rank_probs) + MSE(student_rating, teacher_rating) + hard label anchor
 
-Student 学习的是 teacher 的**软概率分布**，而非硬标签。这比直接用硬标签训练更有效，因为软分布携带了段位之间的相对关系信息（例如 "这个棋手大概率是 5k，小概率是 4k 或 6k"）。
+Student 学习 teacher 的**软概率分布**，而非硬标签。软分布携带段位之间的相对关系信息（例如 "这个棋手大概率是 5k，小概率是 4k 或 6k"）。
 
 ### 3.2 DistillationLoss 设计
 
@@ -156,14 +207,14 @@ L_total = w_kl × KL(teacher_soft ‖ student_soft)      [rank 分布蒸馏]
         + w_hard × RankAnchorLoss(student, hard_labels)    [段位校准锚点]
 ```
 
-Temperature T 控制 teacher 分布的软度。T>1 使分布更平滑，给 student 更丰富的梯度信号。KL loss 乘以 T² 使梯度量级与 T 无关。
+Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 student 更丰富的梯度信号。KL loss 乘以 T² 使梯度量级与 T 无关。
 
 ### 3.3 渐进式微量验证实验 (2026-06-17)
 
 目的: 用极小样本验证 distillation pipeline 端到端可跑通，观察数据量与效果的关系。
 
 **配置:**
-- Teacher: Phase 1 best.pt (val_loss=1.027)
+- Teacher: Phase 1 best.pt (val_loss=1.027, 9.4k 游戏)
 - Student: input_dim=10, hidden_dim=64, 540K 参数
 - Temperature: 2.0
 - 每步 warm-start from 上一步 checkpoint
@@ -179,76 +230,110 @@ Temperature T 控制 teacher 分布的软度。T>1 使分布更平滑，给 stud
 | 100 | 6.695 | 11.2 | 0.0% | 0.960 | 388s |
 | 200 | 5.962 | 11.5 | 0.0% | 0.940 | 738s |
 
-**观察:**
-1. **Rating 预测快速学会** — 50 局时 rating_corr 就达到 0.89，100 局 0.96
-2. **Rank 分类未学会** — 验证集样本太少（10-40 个有 label），且 10-dim 输入信息量有限
-3. **val_loss 持续下降** — 8.65 → 5.96，pipeline 工作正常
-4. **200 局 rating_corr 回落** (0.96→0.94) — warm-start LR 或验证集随机性
+**结论:** Pipeline 跑通。Rating 预测学得快（50 局时 rating_corr=0.89），但 rank 分类需要更多数据。
 
-**结论:** Pipeline 完全跑通。Lite 模型在 rating 预测上有潜力（10-dim scalars 确实编码了强度信息），但 rank 分类需要更多数据和可能更大的 student hidden_dim。全量 5k+ 训练预计效果显著改善。
+### 3.4 全量蒸馏 (2026-06-22 ~ 06-23, Phase 2 Lite)
+
+**配置:**
+- Teacher: Phase 2 best.pt (val_loss=0.7727, 27.2k 游戏训练)
+- Student: input_dim=10, hidden_dim=64, 540K 参数 (4.2x 压缩)
+- 数据: 27,223 训练 / 3,022 验证
+- Temperature: 2.0, w_kl=1.0, w_rating=1.0, w_hard=0.1
+- 超参: batch_size=32, lr=0.0005, warmup=5, cosine decay, patience=30, epochs=100
+- Teacher target 生成: 248.6s (一次性，train+val)
+- 设备: CUDA (RTX 3060)
+
+**训练过程 (精选 epoch):**
+
+| Epoch | Train Loss | Val Loss | 备注 |
+|-------|-----------|----------|------|
+| 1 | 19.466 | 11.286 | 起步 |
+| 10 | 4.743 | 2.285 | 快速下降 |
+| 25 | 2.646 | 0.858 | 首破 1.0 |
+| 42 | 2.217 | 0.738 | |
+| 56 | 2.078 | 0.643 | |
+| 74 | 1.925 | 0.599 | |
+| 82 | 1.948 | 0.586 | |
+| **96** | **1.917** | **0.577** | **best** |
+| 100 | 1.914 | 0.591 | 训练结束 |
+
+**最终结果:**
+
+| 指标 | Teacher (Full 1034-dim) | **Lite (Distilled 10-dim)** | 保留率 |
+|------|------------------------|----------------------------|--------|
+| rank_acc | 69.0% | **61.9%** | **90%** |
+| rank_acc_pm1 | 96.4% | **94.8%** | **98%** |
+| rank_mae | 0.350 | **0.438** | — |
+| rating_corr | 0.9949 | **0.9918** | **99.7%** |
+| 参数量 | 2,263,165 | 539,741 | 4.2x 压缩 |
+| 训练时间 | 47,576s (13.2h) | 47,595s (13.2h) | |
+| 评估样本量 | 6,044 | 6,044 | |
+
+**关键洞察:**
+1. **远超预期** — 预期 rank_acc_pm1 85-92%，实际 94.8%
+2. **rating_corr 0.9918** — 仅 10 个标量特征就达到近乎完美的棋力排序
+3. **100 epoch 跑满无 early stop** — best epoch 96，student 到最后仍在学习
+4. **103x 信息压缩** (1034→10 dim) 只损失了 2% 的 rank_acc_pm1
+5. 蒸馏证明了 KataGo trunk vectors 中的段位信息**大部分可以从标量统计中恢复**
 
 ---
 
-## 4. 数据管道状态
+## 4. 模型对比总览
 
-### 4.1 KAB2 缓存
+| | Baseline | Phase 1 | **Phase 2 (Full)** | **Phase 2 (Lite)** |
+|---|----------|---------|-------------------|-------------------|
+| 数据量 | 5,134 | 9,394 | **27,223** | 27,223 (蒸馏) |
+| input_dim | 1034 | 1034 | **1034** | **10** |
+| 参数量 | 2.26M | 2.26M | **2.26M** | **540K** |
+| val_loss | 2.732 | 1.027 | **0.773** | 0.577 (蒸馏 loss) |
+| rank_acc | 11.5% | 54.4% | **69.0%** | **61.9%** |
+| rank_acc_pm1 | 33.2% | 92.8% | **96.4%** | **94.8%** |
+| rank_mae | 2.76 | 0.542 | **0.350** | **0.438** |
+| rating_corr | 0.449 | 0.993 | **0.995** | **0.992** |
+
+---
+
+## 5. 数据管道状态
+
+### 5.1 KAB2 缓存
 
 | 指标 | 数量 |
 |------|------|
-| 已缓存 (KAB2 .npz) | 5,704 |
-| DB 已分析 | ~17,000 |
-| 待生成 KAB2 | ~11,300 |
-| DB 有 SGF 总量 | ~30,000 |
-
-### 4.2 HumanSL 段位分布 (已缓存数据)
-
-```
-20k( 0):     1    18k( 2):    31    17k( 3):     5    16k( 4):    37
-15k( 5):    58    14k( 6):   100    13k( 7):   299    12k( 8):   183
-11k( 9):   306    10k(10):   471     9k(11):   602     8k(12):   899
- 7k(13):   942     6k(14):  1034     5k(15):  1174     4k(16):  1207 ← 峰值
- 3k(17):  1111     2k(18):   926     1k(19):   755     1d(20):   526
- 2d(21):   346     3d(22):   195     4d(23):   101     5d(24):    52
- 6d(25):    36     7d(26):     6     8d(27):     5
-```
-
-近似正态分布，中心在 4k-5k，覆盖 18k-8d。两端极度稀疏（20k 仅 1 局）。
+| 已缓存 (KAB2 .npz) | ~30,245 |
+| 训练集 (T split) | 27,223 |
+| 验证集 (V split) | 3,022 |
+| 全部含 HumanSL 标签 | 30,245 / 30,245 |
 
 ---
 
-## 5. 训练路线图
+## 6. 训练路线图
 
-### Phase 2: 全量 Teacher 重训 (待 KAB2 生成完成)
-- 数据: 17k+ 局 (全量)
-- 策略: Warm-start from Phase 1 best.pt, LR 降到 1/5 (1e-4)
-- 保持 StratifiedRankSampler + dropout 0.2
-- 预期: val_loss < 0.8, rank_acc_pm1 > 95%
+### 已完成
+- [x] Phase 1: 策略改进训练 (StratifiedRankSampler, dropout, warmup)
+- [x] Phase 2: 全量 Teacher 训练 (27.2k 游戏, val_loss 0.7727)
+- [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%)
 
-### Phase 3: V2 Lite 全量蒸馏
-- Teacher: Phase 2 最优 checkpoint
-- Student: input_dim=10, hidden_dim=64 (或 128 if 10-dim 不够)
-- 全量 17k+ 局蒸馏
-- 预期: rating_corr > 0.95, rank_acc_pm1 待验证
-
-### Phase 4: 增量训练协议
-- 新数据到达时: Warm-start + 低 LR (1/10)
-- 分层采样加权新数据
-- 目标: 30k 局全量训练
+### 下一步
+- **数据扩充** — 数据量收益未饱和，更多游戏预期继续改善
+- **模型容量探索** — hidden_dim 128→256, depth+1
+- **超参调优** — loss 权重、label smoothing、gradient accumulation
+- **Lite 模型部署** — engine_mode=lite 快速推理模式
 
 ---
 
 ## 附录
 
 ### A. 环境配置
-- GPU: NVIDIA GeForce RTX 3060 (4GB)
+- GPU: NVIDIA GeForce RTX 3060 (12GB)
 - CUDA: 13.2 (driver), PyTorch 2.12.0+cu126
 - KataGo: v1.16.5 (custom fork with batch_analysis)
-- Python: 3.10+, uv 包管理
+- Python: 3.12+, uv 包管理
 
 ### B. 文件结构
-- `nets/katarank/best.pt` — Phase 1 最优 teacher checkpoint
-- `nets/katarank/training_report.json` — Phase 1 训练报告
-- `nets/katarank_lite/` — V2 lite distillation checkpoints
+- `nets/katarank/best.pt` — Phase 2 最优 full checkpoint (8.7MB)
+- `nets/katarank/training_report.json` — Phase 2 训练报告
+- `nets/katarank_lite/best_lite.pt` — Phase 2 最优 lite checkpoint (2.2MB)
+- `nets/katarank_lite/training_report.json` — Phase 2 lite 蒸馏报告
 - `~/.katarank/kab2_cache/` — KAB2 特征缓存 (增量)
 - `src/katarank/train/training.py` — 主训练入口
 - `src/katarank/train/distill.py` — 蒸馏训练模块

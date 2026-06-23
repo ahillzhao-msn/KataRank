@@ -372,8 +372,23 @@ def generate_kab2(sgf_dir: Path, output_dir: Path, katago_cfg: dict,
     return npz_count
 
 
+def _game_rank_key(row: dict) -> str:
+    """Return a rank bucket key for stratification (use the stronger player's rank)."""
+    b = row.get("B_humanRank", "")
+    w = row.get("W_humanRank", "")
+    if b and w:
+        b_idx = _RANK_NAMES.index(b.removeprefix("rank_")) if b.removeprefix("rank_") in _RANK_NAMES else -1
+        w_idx = _RANK_NAMES.index(w.removeprefix("rank_")) if w.removeprefix("rank_") in _RANK_NAMES else -1
+        return b if b_idx >= w_idx else w
+    return b or w or "_unknown"
+
+
 def assign_train_val_split(cache_dir: Path, val_fraction: float = 0.1):
-    """Assign T/V split to _meta.csv. Preserves existing V assignments."""
+    """Assign T/V split to _meta.csv using rank-stratified sampling.
+
+    Ensures each rank level is proportionally represented in the val set.
+    Preserves existing V assignments.
+    """
     meta = cache_dir / "_meta.csv"
     if not meta.exists():
         raise FileNotFoundError(f"No _meta.csv in {cache_dir}")
@@ -383,7 +398,6 @@ def assign_train_val_split(cache_dir: Path, val_fraction: float = 0.1):
     if not rows:
         raise ValueError("Empty _meta.csv")
 
-    # Count existing V assignments
     existing_val = {r["file"] for r in rows if r.get("set") == "V"}
     n_target_val = max(1, int(len(rows) * val_fraction))
 
@@ -391,12 +405,39 @@ def assign_train_val_split(cache_dir: Path, val_fraction: float = 0.1):
         log.info("T/V split already adequate: %d val / %d total", len(existing_val), len(rows))
         return
 
-    # Need more val games — pick from rows currently marked T or unmarked
     candidates = [r for r in rows if r["file"] not in existing_val]
-    random.seed(42)
-    random.shuffle(candidates)
     need = n_target_val - len(existing_val)
-    new_val = {r["file"] for r in candidates[:need]}
+
+    # Group candidates by rank for stratified sampling
+    from collections import defaultdict
+    by_rank: dict[str, list[dict]] = defaultdict(list)
+    for r in candidates:
+        by_rank[_game_rank_key(r)].append(r)
+
+    rng = random.Random(42)
+    new_val: set[str] = set()
+    # Proportional allocation per rank stratum
+    remainders: list[tuple[float, str]] = []
+    allocated = 0
+    for rank_key, group in by_rank.items():
+        rng.shuffle(group)
+        share = need * len(group) / len(candidates)
+        n_take = int(share)
+        remainders.append((share - n_take, rank_key))
+        for r in group[:n_take]:
+            new_val.add(r["file"])
+        allocated += n_take
+
+    # Distribute remaining slots by largest fractional remainder
+    remainders.sort(key=lambda x: -x[0])
+    for frac, rank_key in remainders:
+        if allocated >= need:
+            break
+        group = by_rank[rank_key]
+        already = sum(1 for r in group if r["file"] in new_val)
+        if already < len(group):
+            new_val.add(group[already]["file"])
+            allocated += 1
 
     for row in rows:
         if row["file"] in existing_val or row["file"] in new_val:
@@ -411,8 +452,10 @@ def assign_train_val_split(cache_dir: Path, val_fraction: float = 0.1):
         writer.writerows(rows)
 
     n_val = len(existing_val) + len(new_val)
-    log.info("Assigned split: %d train, %d val (%d preserved, %d new)",
-             len(rows) - n_val, n_val, len(existing_val), len(new_val))
+    strata_summary = {k: sum(1 for r in v if r["file"] in new_val)
+                      for k, v in by_rank.items() if any(r["file"] in new_val for r in v)}
+    log.info("Stratified split: %d train, %d val (%d preserved, %d new across %d rank strata)",
+             len(rows) - n_val, n_val, len(existing_val), len(new_val), len(strata_summary))
 
 
 # ── Training ─────────────────────────────────────────────────────────────────

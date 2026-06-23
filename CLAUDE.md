@@ -53,6 +53,17 @@ Each KAB2 payload is a binary struct with a 96-byte header (magic `KAB2`, dims, 
 | `analysis_daemon.py` | Persistent `katago analysis` JSON-protocol daemon used by the REST server |
 | `api/server.py` | FastAPI thin shell over the same workflow functions as the CLI |
 
+### Pre-trained checkpoints (`nets/`)
+
+Two baseline models are checked into the repo:
+
+| Model | Path | Input | Params | rank_acc_pm1 | rating_corr |
+|-------|------|-------|--------|-------------|-------------|
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 |
+| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 |
+
+Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history.
+
 ### Model (`src/katarank/model/`)
 
 - **`DualViewSetTransformer`** (`dual_view.py`): encodes Black and White move streams independently via ISAB set encoders, then applies causal cross-attention (each player attends only to already-played opponent moves). Block-diagonal attention masks keep games independent when batch-packed.

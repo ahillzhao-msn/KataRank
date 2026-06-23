@@ -55,28 +55,31 @@ def _require_fastapi():
 
 # ─── Request schemas ─────────────────────────────────────────────────────────
 
+# Default mode is set at startup from engine_mode config; patched by create_app().
+_DEFAULT_MODE = 'lite'
+
 if _FASTAPI_AVAILABLE:
     class RankStringRequest(BaseModel):
         sgf: str
-        mode: str = 'lite'
+        mode: Optional[str] = None
         min_moves: int = 10
         include_ownership: bool = True
         game_id: Optional[str] = None  # pass real ID to enable KAB2 caching
 
     class RankFileRequest(BaseModel):
         path: str
-        mode: str = 'lite'
+        mode: Optional[str] = None
         min_moves: int = 10
 
     class RankBatchRequest(BaseModel):
         items: List[str]          # file paths or SGF strings
         item_type: str = 'path'   # 'path' | 'string'
-        mode: str = 'lite'
+        mode: Optional[str] = None
         min_moves: int = 10
 
     class RankDirectoryRequest(BaseModel):
         directory: str
-        mode: str = 'lite'
+        mode: Optional[str] = None
         min_moves: int = 10
 
     class OwnershipStringRequest(BaseModel):
@@ -165,6 +168,12 @@ def create_app(
     from katarank.analysis_daemon import AnalysisDaemon
     from katarank.engine import KataGoEngine, PersistentKataGoEngine
     from katarank.workflow import InferenceWorkflow
+
+    global _DEFAULT_MODE
+    _DEFAULT_MODE = engine_mode
+
+    def _resolve_mode(req_mode: Optional[str]) -> str:
+        return req_mode if req_mode is not None else _DEFAULT_MODE
 
     # ── Shared state ──────────────────────────────────────────────────────────
 
@@ -320,7 +329,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_strings(
-                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
+                    engine, inf_workflow, [req.sgf], _resolve_mode(req.mode), req.min_moves,
                     game_ids=[req.game_id] if req.game_id else None,
                 )
         except Exception as e:
@@ -339,7 +348,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_files(
-                    engine, inf_workflow, [req.path], req.mode, req.min_moves
+                    engine, inf_workflow, [req.path], _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -355,7 +364,7 @@ def create_app(
             if req.item_type == 'string':
                 with engine_sem:
                     results = _run_rank_strings(
-                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
                     )
             else:
                 for p in req.items:
@@ -368,7 +377,7 @@ def create_app(
                     )
                 with engine_sem:
                     results = _run_rank_files(
-                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
                     )
         except HTTPException:
             raise
@@ -387,7 +396,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_review_strings(
-                    engine, inf_workflow, [req.sgf], req.mode, req.min_moves,
+                    engine, inf_workflow, [req.sgf], _resolve_mode(req.mode), req.min_moves,
                     include_ownership=req.include_ownership,
                     analysis_daemon=analysis_daemon if req.include_ownership else None,
                     game_ids=[req.game_id] if req.game_id else None,
@@ -408,7 +417,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_review_files(
-                    engine, inf_workflow, [req.path], req.mode, req.min_moves
+                    engine, inf_workflow, [req.path], _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -424,7 +433,7 @@ def create_app(
             if req.item_type == 'string':
                 with engine_sem:
                     results = _run_review_strings(
-                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
                     )
             else:
                 for p in req.items:
@@ -437,7 +446,7 @@ def create_app(
                     )
                 with engine_sem:
                     results = _run_review_files(
-                        engine, inf_workflow, req.items, req.mode, req.min_moves
+                        engine, inf_workflow, req.items, _resolve_mode(req.mode), req.min_moves
                     )
         except HTTPException:
             raise
@@ -459,7 +468,7 @@ def create_app(
         try:
             with engine_sem:
                 results = _run_rank_files(
-                    engine, inf_workflow, sgfs, req.mode, req.min_moves
+                    engine, inf_workflow, sgfs, _resolve_mode(req.mode), req.min_moves
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

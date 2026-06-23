@@ -21,6 +21,37 @@ raw SGF files to rank prediction.
    per player + rating + rank); training output is the `TrainingReport`.
 5. The REST API is a thin shell over the same workflow functions as the CLI.
 
+## Pre-trained models
+
+Two baseline checkpoints are included in the repository:
+
+| Model | Checkpoint | Input | Params | rank_acc_pm1 | rating_corr | Use case |
+|-------|-----------|-------|--------|-------------|-------------|----------|
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 | Best accuracy (requires KataGo trunk vectors) |
+| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 | Fast inference (scalar features only, no trunk) |
+
+Both models predict Go player rank (20k–9d, 29 classes) from game records. The Lite model was distilled from the Full model and retains 98% of its ±1 rank accuracy while requiring only 10 scalar features per move.
+
+**Using the models:**
+
+```python
+from katarank.model import KataRankModel
+
+# Load either model
+model = KataRankModel.load('nets/katarank/best.pt')          # Full
+model = KataRankModel.load('nets/katarank_lite/best_lite.pt') # Lite
+
+# Inference via CLI
+uv run katarank-infer game.sgf --checkpoint nets/katarank/best.pt
+
+# Inference via REST API (configured in ~/.katarank/server.toml)
+curl -X POST http://localhost:8765/rank/string \
+  -H "Content-Type: application/json" \
+  -d '{"sgf": "(;GM[1]SZ[19];B[pd];W[dp]...)"}'
+```
+
+Training details and experiment history: see `docs/training_log.md`.
+
 ---
 
 ## Installation

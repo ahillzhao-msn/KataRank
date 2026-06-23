@@ -144,9 +144,10 @@ cython_debug/
 # PyCharm
 #.idea/
 
-# Model checkpoints (large binaries)
-nets/
-*.pt
+# Model checkpoints — track released baselines, ignore intermediates
+nets/katarank/final.pt
+nets/katarank_lite/final_lite.pt
+nets/katarank_lite/step_*/
 
 # Windows NUL device artifact
 nul
