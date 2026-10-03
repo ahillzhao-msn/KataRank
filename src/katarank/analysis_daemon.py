@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -32,7 +31,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
+from katarank._priority import INTERACTIVE_FLAGS
 
 
 class _QueryFuture:
@@ -127,7 +126,7 @@ class AnalysisDaemon:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=INTERACTIVE_FLAGS,
         )
         self._alive = True
 

@@ -626,6 +626,8 @@ def _write_config_template():
 
 def main():
     _require_fastapi()
+    from katarank._priority import raise_server_priority
+    raise_server_priority()
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s %(levelname)s %(name)s: %(message)s',

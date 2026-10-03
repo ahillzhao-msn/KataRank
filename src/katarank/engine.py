@@ -45,7 +45,6 @@ Typical usage:
 import os
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 import zlib
@@ -58,7 +57,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-_CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
+from katarank._priority import BATCH_FLAGS, INTERACTIVE_FLAGS, ON_DEMAND_FLAGS
 
 
 # ─── KAB2 constants ──────────────────────────────────────────────────────────
@@ -300,7 +299,7 @@ class KataGoEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=BATCH_FLAGS,
         )
 
         # Drain stderr in a background thread: katago writes progress there,
@@ -440,7 +439,7 @@ class KataGoEngine:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=_CREATE_NO_WINDOW,
+                creationflags=INTERACTIVE_FLAGS,
             )
             stdout, _ = proc.communicate(
                 input=(_json.dumps(query) + '\n').encode('utf-8'),
@@ -624,7 +623,7 @@ class PersistentKataGoEngine(KataGoEngine):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=ON_DEMAND_FLAGS,
         )
 
         ready = threading.Event()
