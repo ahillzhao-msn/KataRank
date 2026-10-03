@@ -86,6 +86,7 @@ if _FASTAPI_AVAILABLE:
         sgf: str
         max_visits: int = 1
 
+        last_only: bool = False   # analyze only the final position
     class VariationStringRequest(BaseModel):
         sgf: str
         turn: int                                   # 0-based branch point
@@ -499,7 +500,7 @@ def create_app(
         """
         try:
             ownership_map = analysis_daemon.query_ownership(
-                req.sgf, max_visits=req.max_visits
+                req.sgf, max_visits=req.max_visits, last_only=req.last_only
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

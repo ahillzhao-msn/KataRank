@@ -275,6 +275,7 @@ class AnalysisDaemon:
         sgf_content: str,
         *,
         max_visits: int = 1,
+        last_only: bool = False,
         timeout: float = 180.0,
     ) -> Dict[int, List[float]]:
         """Per-position ownership for every turn of a game.
@@ -283,7 +284,9 @@ class AnalysisDaemon:
             sgf_content: Raw SGF string (single game).
             max_visits:  NN visits per position. 1 = single forward pass,
                          sufficient for territory overlay (~50ms/turn on GPU).
-            timeout:     Total seconds to wait for all N+1 responses.
+            last_only:   Analyze only the final position (1 response instead
+                         of N+1) — for callers that want one move's overlay.
+            timeout:     Total seconds to wait for all responses.
 
         Returns:
             Dict of turn_number (0-based) → [361 floats].
@@ -296,6 +299,7 @@ class AnalysisDaemon:
             return {}
 
         n_turns = len(params['moves']) + 1   # include empty-board turn 0
+        turns = [n_turns - 1] if last_only else list(range(n_turns))
         query = {
             'initialStones':    [],
             'moves':            params['moves'],
@@ -305,10 +309,10 @@ class AnalysisDaemon:
             'boardYSize':       params['board_size'],
             'maxVisits':        max_visits,
             'includeOwnership': True,
-            'analyzeTurns':     list(range(n_turns)),
+            'analyzeTurns':     turns,
         }
 
-        responses = self._send(query, expected=n_turns, timeout=timeout)
+        responses = self._send(query, expected=len(turns), timeout=timeout)
         return {
             resp['turnNumber']: resp['ownership']
             for resp in responses
