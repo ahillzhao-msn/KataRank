@@ -39,6 +39,10 @@ def raise_server_priority() -> None:
     if sys.platform != 'win32':
         return
     import ctypes
+    from ctypes import wintypes
     kernel32 = ctypes.windll.kernel32
+    # Default c_int restype truncates the -1 pseudo-handle on 64-bit
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), _ABOVE_NORMAL):
         logger.warning('SetPriorityClass(ABOVE_NORMAL) failed')
