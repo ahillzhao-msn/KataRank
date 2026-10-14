@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -89,7 +90,12 @@ class AnalysisDaemon:
         config: Optional[str] = None,
         human_model: Optional[str] = None,
     ) -> None:
-        self._bin         = katago_bin
+        # $KATAGO_ANALYSIS_BIN lets the JSON daemon run a different binary
+        # from the batch engine. The custom batch_analysis build (needed for
+        # KAB2) barely batches `analysis` queries (avg NN batch ~1.2): a
+        # 178-position 1-visit ownership query takes ~25 s on it vs ~1 s on
+        # stock KataGo (OpenCL v1.15.1 / TensorRT v1.16.0) — 2026-10-14.
+        self._bin         = os.environ.get('KATAGO_ANALYSIS_BIN') or katago_bin
         self._model       = model
         self._config      = config
         self._human_model = human_model
