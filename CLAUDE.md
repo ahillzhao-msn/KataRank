@@ -40,7 +40,7 @@ The custom KataGo binary emits per-player feature frames in two delivery modes:
 - **Stream mode** (pipe): `[1B side B/W][4B idLen][game_id][4B size][KAB2 payload]`, terminated by `0x00`. Used for live inference.
 - **File mode** (disk): `[4B B_size][B payload][4B W_size][W payload]` packed into `.npz` files. Used for training datasets.
 
-Each KAB2 payload is a binary struct with a 96-byte header (magic `KAB2`, dims, 16×float32 `PlayerSummary`) followed by `numMoves × moveDim` float32 move features. Key `PlayerSummary` indices: `[2]` = `meanLogPrior` (primary training target), `[10]` = `humanRankIdx` (0–28 for 20k–9d, –1 if absent), `[11]` = `humanLogPrior`. Parsing lives in `engine.py:parse_kab2_buffer`.
+Each KAB2 payload is a binary struct with a 96-byte header (magic `KAB2`, dims, 16×float32 `PlayerSummary`) followed by `numMoves × moveDim` float32 move features. Key `PlayerSummary` indices: `[2]` = `meanLogPrior` (primary training target), `[10]` = `humanRankIdx` (HumanSL anchor rounded, 0–28 for 20k–9d, –1 if absent), `[11]` = `humanLogPrior`, `[12..15]` = anchor v2 `humanRankExp` / `humanRankSd` / `humanProfiles` / `humanAnchorVer`. The single KAB2 codec (parse + build) is `data/preprocess.py`; `engine.py` re-exports `parse_kab2_buffer` / `build_kab2_payload`.
 
 ### Core modules
 
@@ -62,7 +62,7 @@ Two baseline models are checked into the repo:
 | **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 |
 
-Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history.
+Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were trained on all-zero trunk with legacy (formula-like) HumanSL labels — their metrics are void (training_log §2.4); a retrain is in progress.** Production training: `scripts/auto_train.py` (`docs/training-guide.md` §3.2).
 
 ### Model (`src/katarank/model/`)
 
@@ -84,7 +84,7 @@ Games are packed into a single tensor: `x` is `(total_moves_across_games, input_
 
 ### Key external dependency
 
-Requires the **custom KataGo fork** binary (`ahillzhao-msn/KataGo`). Stock KataGo does not have `batch_analysis`. Binary is gitignored — place at `src/katarank/bin/katago.exe` or set `KATAGO_BIN` env var. The `katago analysis` daemon (used by REST server) also requires this fork.
+Requires the **custom KataGo fork** binary (`ahillzhao-msn/KataGo`). Stock KataGo does not have `batch_analysis`. Binary is gitignored — set `katago_bin` in `~/.katarank/server.toml`, place it at `src/katarank/bin/katago.exe`, or set `KATAGO_BIN`. The `katago analysis` daemon (used by the REST server) needs no fork features — any KataGo build can serve it.
 
 ### Tests
 

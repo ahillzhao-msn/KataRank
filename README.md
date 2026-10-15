@@ -30,7 +30,13 @@ Two baseline checkpoints are included in the repository:
 | **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 | Best accuracy (requires KataGo trunk vectors) |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 | Fast inference (scalar features only, no trunk) |
 
-Both models predict Go player rank (20k–9d, 29 classes) from game records. The Lite model was distilled from the Full model and retains 98% of its ±1 rank accuracy while requiring only 10 scalar features per move.
+Both models predict Go player rank (20k–9d, 29 classes) from game records. The Lite model was distilled from the Full model and needs only 10 scalar features per move.
+
+> **These checkpoints and metrics predate two data fixes (2026-10).** They were trained on KAB2
+> whose trunk columns were all zero, with HumanSL labels from the legacy 3-profile window, which
+> were effectively a formula of the input scalars. The numbers measure how well the model
+> reproduces that formula, not rank-assessment skill. A full retrain on corrected data is under way;
+> see `docs/training_log.md` §2.4.
 
 **Using the models:**
 
@@ -259,9 +265,19 @@ inference.
 
 ### Train the rank model
 
+Production training goes through the GoPredict-driven pipeline
+(`docs/training-guide.md` §3.2). It exports games from the GoPredict DB, generates KAB2 into
+`~/.katarank/kab2_cache`, splits T/V, trains, and records the run in `model_versions`:
+
+```bash
+uv run python scripts/auto_train.py --force           # resumes from nets/katarank/best.pt
+uv run python scripts/auto_train.py --force --fresh   # from scratch (features/labels changed)
+```
+
+The training module can also be run directly for experiments:
+
 ```bash
 uv run katarank-train --data-dir data/kab2 --epochs 100
-# or with a custom config:
 uv run katarank-train --config src/katarank/train/config_kata_native.yaml
 ```
 
@@ -452,8 +468,15 @@ Key `PlayerSummary` fields:
 | Index | Field | Description |
 |-------|-------|-------------|
 | 2 | `meanLogPrior` | Primary training target (log KataGo policy prior) |
-| 10 | `humanRankIdx` | 0–28 (20k–9d), –1 if HumanSL not computed |
-| 11 | `humanLogPrior` | HumanSL confidence weight |
+| 10 | `humanRankIdx` | HumanSL anchor rounded, 0–28 (20k–9d); –1 if HumanSL not computed |
+| 11 | `humanLogPrior` | Mean HumanSL log-likelihood at the best evaluated profile (confidence weight) |
+| 12 | `humanRankExp` | Anchor v2: continuous posterior-mean rank |
+| 13 | `humanRankSd` | Anchor v2: posterior sd (ranks) |
+| 14 | `humanProfiles` | Anchor v2: number of HumanSL profiles evaluated |
+| 15 | `humanAnchorVer` | Anchor method version (2 = loss-gated 5-profile; 0 = legacy) |
+
+The anchor method is described in `docs/MODEL_V3_ARCHITECTURE.md` §6.6. The parser and writer live in
+`katarank.data.preprocess`.
 
 ### Stream mode — per-player frames with game id
 
@@ -503,8 +526,10 @@ katarank/
 │   ├── katago_setup.py      KataGo binary discovery + VRAM auto-config
 │   ├── analysis_daemon.py   Persistent `katago analysis` (JSON protocol)
 │   ├── api/server.py        katarank-server (FastAPI, thin shell over workflow)
+│   ├── _sgf_parse.py        minimal SGF parsing helpers
+│   ├── sgf_meta.py          SGF metadata extraction
 │   ├── data/
-│   │   ├── preprocess.py    read_kab2(), read_kab2_combined(), probe_kab2_dim()
+│   │   ├── preprocess.py    KAB2 codec: parse/build, read_kab2(_combined), probe_kab2_dim
 │   │   └── datasets/
 │   │       ├── dataset_kab2.py    KAB2Dataset (combined .npz files)
 │   │       └── dataset_stream.py  KAB2StreamDataset (live engine stream)
@@ -517,11 +542,16 @@ katarank/
 │   │   └── sae.py           SAE interface: FeatureExtractor, FeatureRegistry
 │   └── train/
 │       ├── training.py      katarank-train entry point + TrainingReport emission
+│       ├── distill.py       Full → Lite knowledge distillation
 │       └── config_kata_native.yaml
 ├── scripts/
+│   ├── auto_train.py        GoPredict-driven pipeline: export → KAB2 → split → train → register
+│   ├── generate_kab2_incremental.py  KAB2 generation only (no training)
+│   ├── validate_split.py    pre-training check of the T/V rank distribution
+│   ├── start-katarank.ps1   headless server start/stop/restart (reads server.toml)
+│   ├── install-train-task.ps1 / check-train.ps1  scheduled auto-training task
 │   ├── katarank-server.bat  Windows startup script
-│   ├── install-service.ps1  Windows NSSM service installer
-│   └── benchmark.py         Performance benchmark
+│   └── install-service.ps1  Windows NSSM service installer
 ├── tests/
 ├── docs/
 ├── requirements.txt         Pinned runtime deps (core + API server)
