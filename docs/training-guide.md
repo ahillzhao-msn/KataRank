@@ -114,21 +114,26 @@ uv run python scripts/validate_split.py --meta data/kab2/_meta.csv
 
 ### 3.2 训练命令
 
-**标准流程**（生产训练一律走这条）——`scripts/auto_train.py` 由 GOPredict 数据库驱动：
+**生产训练走 GOPredict 发起的带闸门训练会话**：
 
-```bash
-# 达到阈值（默认每 3000 局新增）才训练；--force 无条件训练
-uv run python scripts/auto_train.py --force
-# 特征或标签变了（KAB2 格式 / HumanSL 锚点变更）→ 从头训，不续训 best.pt
-uv run python scripts/auto_train.py --force --fresh
-# 只看会做什么
-uv run python scripts/auto_train.py --force --dry-run
+```
+GOPredict  POST /api/v1/models/train?force=true[&from_scratch=true]   （导入页按钮）
+  → KataRank POST /train/start → scripts/train_session.py [--force] [--from-scratch]
 ```
 
-流程：导出缺 KAB2 的棋局 → `batch_analysis`（二进制取自 `~/.katarank/server.toml` 的
-`katago_bin`，含 `-human-model`）→ 并入 `~/.katarank/kab2_cache` → `rebuild_meta` + 分层
-T/V 划分 → `katarank.train.training`（产物写入 `nets/katarank/`）→ 写入 GOPredict
-`model_versions` 表。不加 `--fresh` 时默认从 `nets/katarank/best.pt` 续训。
+会话的第 1–4 步复用 `scripts/auto_train.py`：
+1. 导出缺 KAB2 的棋局；
+2. 用 `batch_analysis` 生成 KAB2。二进制取自 `~/.katarank/server.toml` 的 `katago_bin`，并带上 `-human-model`；
+3. 并入 `~/.katarank/kab2_cache`；
+4. `rebuild_meta`，并做分层 T/V 划分。
+
+之后训练进暂存区 `nets/_candidate/`，在**同一份 holdout** 上评估候选模型与线上模型。候选更好才
+晋升：复制到 `nets/katarank/`，写入 `model_versions`（active），并重启服务。否则丢弃，只留一行
+`active=false` 的审计记录。特征或标签变了（KAB2 格式、HumanSL 锚点变更）时用
+`from_scratch=true`；默认从线上 checkpoint 续训。进度用 `GET /api/v1/models/train/status` 查看。
+
+`scripts/auto_train.py` 单独运行时会跳过评估闸门，**直接覆盖 `nets/katarank/best.pt` 并登记为 active**。
+只在明确要绕过闸门时使用。
 
 **直接调用训练模块**（实验用；注意默认 `checkpoint_dir` 就是线上的 `nets/katarank`）：
 

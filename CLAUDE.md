@@ -62,7 +62,7 @@ Two baseline models are checked into the repo:
 | **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 |
 
-Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were trained on all-zero trunk with legacy (formula-like) HumanSL labels — their metrics are void (training_log §2.4); a retrain is in progress.** Production training: `scripts/auto_train.py` (`docs/training-guide.md` §3.2).
+Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were trained on all-zero trunk with legacy (formula-like) HumanSL labels — their metrics are void (training_log §2.4); a retrain is in progress.** Production training: the gated session GoPredict triggers (`POST /api/v1/models/train` → `/train/start` → `scripts/train_session.py`, which reuses `scripts/auto_train.py` steps 1–4 and promotes only a candidate that beats the live model) — `docs/training-guide.md` §3.2.
 
 ### Model (`src/katarank/model/`)
 

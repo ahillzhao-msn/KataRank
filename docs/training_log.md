@@ -191,6 +191,10 @@ Epoch 6-150: Cosine annealing  lr → lr_min (1e-5)
 复核 Phase 2 Teacher（2.3）与 Lite（3.4）时发现，其训练数据存在两处缺陷，**两者报告的指标
 都不能当作模型能力的度量**。原 checkpoint 与报告保留在 `nets/` 中，未作改动；此处只作记录。
 
+受影响的还有此后的所有线上版本，因为它们都在同一批数据上训练（见 GOPredict `model_versions` 表）：
+- Full v20260811_022603：31,362 局，rank_acc 69.1%，±1 95.9%。由 v20260620_full_001 续训，手动放行晋升。
+- Lite v20260620_000321：rank_acc 62.0%，±1 94.8%。
+
 **缺陷 1 — trunk 全为 0。** 自 fork 提交 15a5bced（2026-06-09）起，`includeTrunk` 没有从请求
 传到后端，OpenCL 读回又忽略了 FP16 tensor core 的 padding（368 而非 361），所以 KAB2 的
 trunk/pick 列全部为 0。`kab2_cache` 的 3.1 万个文件与 `data/kab2` 的 1.5 万个文件都是如此。
@@ -212,8 +216,10 @@ Teacher 输入层 trunk 列的权重范数约 0.2，标量列约 1.07，即 trun
 - StratifiedRankSampler 的 bucket 重洗原先洗的是副本（#4）；
 - batch_analysis 的 NN 缓存会驻留每个带 trunk 的结果，内存每盘多约 0.17 GB（KataGo#2）。
 
-**处理：** 用修复后的二进制对数据库全部 32,358 局重新生成 KAB2，然后从头重训：
-`auto_train.py --force --fresh`（#5）。旧缓存移至 `~/.katarank/kab2_cache_v1_zerotrunk`：其中
+**处理：** 用修复后的二进制，对数据库全部 32,358 局重新生成 KAB2，然后从头重训。入口走标准的
+带闸门训练会话：GOPredict `POST /api/v1/models/train?force=true&from_scratch=true` →
+KataRank `/train/start` → `scripts/train_session.py --force --from-scratch`。会话在暂存区训练，
+在同一 holdout 上与线上模型比较，胜出才晋升。旧缓存移至 `~/.katarank/kab2_cache_v1_zerotrunk`：其中
 标量列与新二进制逐位一致，trunk 为 0，标签为旧锚点。
 
 ## 3. V2 Lite Model — 知识蒸馏
@@ -330,8 +336,8 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 
 ### 5.1 KAB2 缓存
 
-2026-10-14 起，`~/.katarank/kab2_cache` 由 `auto_train.py --force --fresh` 对数据库全部
-32,358 局重新生成（真实 trunk + 锚点 v2），T/V 划分重新分层。旧缓存（Phase 2 用的约 3.1 万
+2026-10-14 起，`~/.katarank/kab2_cache` 由带闸门训练会话（`train_session.py --force --from-scratch`）
+对数据库全部 32,358 局重新生成（真实 trunk + 锚点 v2），T/V 划分重新分层。旧缓存（Phase 2 用的约 3.1 万
 个文件，trunk 为 0、旧锚点标签）移至 `~/.katarank/kab2_cache_v1_zerotrunk`。
 
 ---

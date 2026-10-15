@@ -265,14 +265,14 @@ inference.
 
 ### Train the rank model
 
-Production training goes through the GoPredict-driven pipeline
-(`docs/training-guide.md` §3.2). It exports games from the GoPredict DB, generates KAB2 into
-`~/.katarank/kab2_cache`, splits T/V, trains, and records the run in `model_versions`:
+Production training is a gated session triggered from GoPredict
+(`POST /api/v1/models/train`, which calls KataRank's `/train/start` and runs `scripts/train_session.py`):
+1. export games from the GoPredict DB;
+2. generate KAB2 into `~/.katarank/kab2_cache` and split T/V;
+3. train a candidate into `nets/_candidate/`;
+4. promote it only if it beats the live model on the same holdout.
 
-```bash
-uv run python scripts/auto_train.py --force           # resumes from nets/katarank/best.pt
-uv run python scripts/auto_train.py --force --fresh   # from scratch (features/labels changed)
-```
+See `docs/training-guide.md` §3.2. Running `scripts/auto_train.py` directly skips that gate.
 
 The training module can also be run directly for experiments:
 
@@ -545,7 +545,8 @@ katarank/
 │       ├── distill.py       Full → Lite knowledge distillation
 │       └── config_kata_native.yaml
 ├── scripts/
-│   ├── auto_train.py        GoPredict-driven pipeline: export → KAB2 → split → train → register
+│   ├── train_session.py     gated training session (GoPredict /api/v1/models/train → /train/start)
+│   ├── auto_train.py        shared steps (export → KAB2 → split) + ungated direct training
 │   ├── generate_kab2_incremental.py  KAB2 generation only (no training)
 │   ├── validate_split.py    pre-training check of the T/V rank distribution
 │   ├── start-katarank.ps1   headless server start/stop/restart (reads server.toml)
