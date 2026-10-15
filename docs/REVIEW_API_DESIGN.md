@@ -2,7 +2,7 @@
 
 **Version**: 0.1
 **Date**: 2026-06-11
-**Status**: design approved → implementation in this change
+**Status**: implemented — `/review/*` endpoints in `api/server.py`, per-move records in `workflow._move_records`; consumed by GOPredict (`engine/katarank.py`)
 **Related**: `SAE_DESIGN.md`（同一端点家族的未来扩展）, `MODEL_V3_ARCHITECTURE.md`,
 gopredict integration（消费方契约见 §5）
 

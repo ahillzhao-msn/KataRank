@@ -9,7 +9,7 @@ for reviewed human games — variations/branches are not needed here.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 # GTP column letters — skips 'I' as per GTP standard
 _GTP_COLS = 'ABCDEFGHJKLMNOPQRST'

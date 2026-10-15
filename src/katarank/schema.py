@@ -10,13 +10,16 @@ Defines the canonical data contract for the project.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, TypedDict, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, TypedDict, Union
 try:
     from typing import NotRequired
 except ImportError:
     from typing_extensions import NotRequired
 
 import torch
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 # ─── Canonical sample type ────────────────────────────────────────────────────

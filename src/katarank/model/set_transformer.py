@@ -13,12 +13,10 @@ Architecture:
     → Linear projection → ISAB blocks → PMA → Output heads
 """
 
-import math
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, List, Dict, Tuple, Callable
+from typing import Optional, List, Tuple
 
 
 def unbatch(x: torch.Tensor, xlens: Optional[List[int]]) -> List[slice]:
