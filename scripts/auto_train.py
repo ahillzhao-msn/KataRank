@@ -179,6 +179,8 @@ _META_FIELDNAMES = [
     "B_complexity", "B_scoreVar", "B_drop", "B_humanRank", "B_humanLogPrior",
     "W_acc1", "W_acc3", "W_logPrior", "W_winRate", "W_scoreLead",
     "W_complexity", "W_scoreVar", "W_drop", "W_humanRank", "W_humanLogPrior",
+    # HumanSL anchor v2 (batch_analysis appends these; empty for legacy files)
+    "B_humanRankExp", "B_humanRankSd", "W_humanRankExp", "W_humanRankSd", "humanAnchorVer",
 ]
 
 
@@ -186,6 +188,10 @@ def _rank_idx_to_str(idx: int) -> str:
     if 0 <= idx < len(_RANK_NAMES):
         return f"rank_{_RANK_NAMES[idx]}"
     return ""
+
+
+def _round_or_blank(v) -> float | str:
+    return "" if v is None else round(v, 6)
 
 
 def _info_to_meta_fields(info: dict, prefix: str) -> dict:
@@ -204,6 +210,9 @@ def _info_to_meta_fields(info: dict, prefix: str) -> dict:
         f"{prefix}_drop":          round(summary[7], 6) if len(summary) > 7 else 0,
         f"{prefix}_humanRank":     _rank_idx_to_str(rank_idx),
         f"{prefix}_humanLogPrior": round(info.get("human_log_prior", 0.0), 6),
+        f"{prefix}_humanRankExp":  _round_or_blank(info.get("human_rank_exp")),
+        f"{prefix}_humanRankSd":   _round_or_blank(info.get("human_rank_sd")),
+        "humanAnchorVer":          info.get("human_anchor_ver", 0),
         f"__{prefix}_moves":       n,
     }
 
