@@ -16,10 +16,9 @@ Key design choices:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Optional, List, Tuple
 
-from katarank.model.set_transformer import SetEncoder, unbatch
+from katarank.model.set_transformer import SetEncoder
 
 
 # ─── Causal Mask Builders ─────────────────────────────────────────────────────

@@ -2,7 +2,9 @@
 
 **Version**: 3.0  
 **Date**: 2026-06-09  
-**Based on**: STRENGTH_MODEL_RESEARCH.md §9–§14, KAB2 format spec
+**Based on**: STRENGTH_MODEL_RESEARCH.md §9–§14 (early research note, not in this repo), KAB2 format spec
+**Status (2026-10)**: architecture matches the code; §9 is the historical v2→v3 migration
+checklist. KAB2 format authority: `src/katarank/data/preprocess.py`.
 
 ---
 
@@ -63,7 +65,8 @@ move_vec (1, input_dim)  where input_dim = 10 + 2 × trunkCh
 | 字段 | 类型 | 范围 | 用途 |
 |---|---|---|---|
 | `meanLogPrior` | float | -5.9（20k）~ -0.5（9d） | 主任务：强度回归目标 |
-| `humanRankIdx` | float→int | 0-28 或 -1（未启用） | 辅任务：段位分类目标 |
+| `humanRankIdx` | float→int | 0-28 或 -1（未启用） | 辅任务：段位分类目标（锚点 v2 的后验均值取整） |
+| `humanRankExp` / `humanRankSd` | float | 0-28 / 档 | 锚点 v2 的连续后验均值与标准差（summary[12]/[13]，`humanAnchorVer`≥2 时有效） |
 | `humanLogPrior` | float | < 0 | 段位标签置信度权重 |
 
 ---
@@ -258,7 +261,7 @@ z   = self.fusion(cat([z_b, z_w]))  # Linear(6*hidden_dim → hidden_dim)
 | 信号 | 来源 | 阶段 | 作用 |
 |---|---|---|---|
 | `meanLogPrior` | KataGo policy | 训练 + 推理 | 主任务回归目标；KataGo 视角的客观棋力 |
-| `humanRankIdx` | HumanSL best-fit | **仅训练** | 锚定 OrdinalHead 的 threshold 到有意义段位边界 |
+| `humanRankIdx` | HumanSL 锚点 v2（见 §6.6） | **仅训练** | 锚定 OrdinalHead 的 threshold 到有意义段位边界 |
 | `humanLogPrior` | HumanSL log-likelihood | **仅训练** | 段位标签的置信度权重 |
 
 ### 6.3 OrdinalHead 的 threshold 锚定机制
@@ -312,17 +315,22 @@ z (hidden_dim) → Linear(hidden_dim → hidden_dim//2) → ReLU → Dropout
 
 归一化：`norm(x) = (x − μ) / σ`，μ ≈ −3.2，σ ≈ 1.4。
 
-### 6.6 两个信号在段位空间的线性关系
+### 6.6 HumanSL 锚点：怎么得到 humanRankIdx
 
-```
-meanLogPrior:  -5.9   -4.5   -3.2   -1.9   -0.5
-humanRankIdx:   0      7     14     21     28
-               20k    13k    6k     1d     9d
-```
+`batch_analysis`（KataGo fork）对每位棋手、每盘棋执行同一套固定流程（锚点 v2，KataGo#2）：
 
-近似关系：`humanRankIdx ≈ (meanLogPrior + 5.9) / 5.4 × 28`
+1. **主模型守门**：只保留该棋手本盘「主模型目差损失」处于 10%–90% 分位的着法参与投票，
+   排除极好与极坏的离群手；
+2. 计算这些着法在 5 个固定 HumanSL 档位（20k、13k、6k、2d、9d）下的总对数似然；
+3. 自然三次样条插值到全部 29 档，得到平坦先验下的后验分布；
+4. 标签 = 后验均值（`humanRankExp`，取整即 `humanRankIdx`），后验标准差为 `humanRankSd`。
 
-这是 `batch_analysis` 的 `rankCandidates` 公式的逆，说明两个信号在同一空间内共轭。训练成功后，OrdinalHead 的 threshold 应当近似落在这条线对应的 θ 位置上。
+设计取向是**客观、稳定、可复现**而非追求「真实段位」：每盘棋使用完全相同的方法和标尺。
+80 盘 / 160 名棋手上，折半信度与「全部着法 × 29 档全扫」相同（r 0.78 vs 0.78），算力约 14%。
+
+> **更正（2026-10）**：此前本节写道 `humanRankIdx ≈ (meanLogPrior + 5.9) / 5.4 × 28`，
+> 并称两个信号「共轭」。那是旧锚点的假象：旧实现只在该公式算出的中心档附近测 3 档并取 argmax，
+> 89% 的棋手落在窗口上沿，标签实质上就是公式本身，而不是 HumanSL 的独立判断。
 
 ---
 
@@ -428,9 +436,9 @@ training:
 ## 10. 数据流完整示意
 
 ```
-KAB2 文件对
-  game_XXXX_B.npz  →  moves_B (N_b, 1034)  +  summary_B
-  game_XXXX_W.npz  →  moves_W (N_w, 1034)  +  summary_W
+KAB2 合并文件（每局一个）
+  <game_id>.npz = [4B B_size][B KAB2][4B W_size][W KAB2]
+    → moves_B (N_b, 1034) + summary_B,  moves_W (N_w, 1034) + summary_W
 
 标签提取:
   target_b = normalize(summary_B[2])    ← meanLogPrior_B
@@ -443,8 +451,8 @@ KAB2 文件对
 模型输入:
   x      = cat([moves_B, moves_W])      (N_b+N_w, 1034)
   xlens  = [N_b + N_w]
-  turn_b = moves_B[:, 8]               (N_b,) ← scalar[8]
-  turn_w = moves_W[:, 8]               (N_w,)
+  turn_b = 2 · arange(N_b)             (N_b,) ← 流内位置（黑走偶数手）
+  turn_w = 2 · arange(N_w) + 1         (N_w,) ← 流内位置（白走奇数手）
 
 前向：
   x → projection → split(dim=7)
