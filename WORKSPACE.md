@@ -39,7 +39,7 @@ On first run a config template is written to `~/.katarank/server.toml`. Edit it 
 # katago_bin = "C:/path/to/katago.exe"   # the custom fork (batch_analysis); see below
 host = "127.0.0.1"
 port = 8765
-engine_mode = "lite"
+engine_mode = "lite"   # must match the mode clients request (GOPredict: its active model's mode)
 ```
 
 `katarank-server --init-config` rewrites the commented template listing every key.

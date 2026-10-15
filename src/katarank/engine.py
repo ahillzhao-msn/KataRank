@@ -42,6 +42,7 @@ Typical usage:
     engine.batch_to_files(sgf_paths=['g1.sgf', 'g2.sgf'], output_dir='features/')
 """
 
+import logging
 import os
 import struct
 import subprocess
@@ -59,6 +60,8 @@ import numpy as np
 from katarank._priority import BATCH_FLAGS, INTERACTIVE_FLAGS, ON_DEMAND_FLAGS
 # KAB2 codec lives in katarank.data.preprocess; re-exported for the public API.
 from katarank.data.preprocess import build_kab2_payload, parse_kab2_buffer  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 # Stream protocol: [1B side][4B uint32 idLen][game id][4B uint32 size][payload]
@@ -190,6 +193,7 @@ class KataGoEngine:
         mode: str = 'full',
         min_moves: int = 10,
         max_games: int = 0,
+        creationflags: int = BATCH_FLAGS,
     ) -> Generator[Tuple[str, np.ndarray, Dict], None, None]:
         """
         Run batch_analysis in stream mode; yield one record per player per game.
@@ -199,6 +203,8 @@ class KataGoEngine:
             sgf_strings: List of SGF content strings.
             sgf_dir:     Directory to scan for .sgf files.
             csv:         Path to a pre-made CSV list file.
+        creationflags: process priority tier (BATCH by default — bulk runs yield to
+            everything; callers serving a waiting request pass ON_DEMAND_FLAGS).
 
         Yields:
             (side, moves, info) per player per game.
@@ -222,7 +228,7 @@ class KataGoEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=BATCH_FLAGS,
+            creationflags=creationflags,
         )
 
         # Drain stderr in a background thread: katago writes progress there,
@@ -525,6 +531,7 @@ class PersistentKataGoEngine(KataGoEngine):
                          human_model=human_model, katago_bin=katago_bin)
         self.mode = mode
         self.min_moves = min_moves
+        self._fallback_logged: set = set()
         self._proc: Optional[subprocess.Popen] = None
         self._stderr_tail: deque = deque(maxlen=100)
         self._lock = threading.Lock()
@@ -637,15 +644,20 @@ class PersistentKataGoEngine(KataGoEngine):
         falls back to a one-shot subprocess (slow path) with a warning.
         """
         if mode is not None and mode != self.mode:
-            import warnings
-            warnings.warn(
-                f"PersistentKataGoEngine runs mode='{self.mode}'; request for "
-                f"'{mode}' falls back to a one-shot subprocess"
-            )
+            # Every such request reloads the model in a fresh process. It serves a
+            # waiting caller, so it runs at ON_DEMAND priority: at BATCH (below normal)
+            # it starved behind a training run and every /review timed out.
+            if mode not in self._fallback_logged:
+                self._fallback_logged.add(mode)
+                logger.warning(
+                    "katago daemon runs mode=%r but a request asked for %r: each such "
+                    "request spawns a one-shot process (model reload). Set engine_mode = "
+                    "%r in server.toml if that is the mode clients use.",
+                    self.mode, mode, mode)
             yield from super().stream_games(
                 sgf_paths, sgf_strings=sgf_strings, sgf_dir=sgf_dir, csv=csv,
                 mode=mode, min_moves=min_moves or self.min_moves,
-                max_games=max_games,
+                max_games=max_games, creationflags=ON_DEMAND_FLAGS,
             )
             return
 

@@ -238,6 +238,34 @@ class TestStreamProtocol(unittest.TestCase):
         frames = list(self._engine()._read_stream(io.BytesIO(raw)))
         self.assertEqual(frames, [])
 
+    def _spawned_flags(self, engine, **kwargs) -> int:
+        """Run stream_games against a fake katago and return the creationflags it got."""
+        buf, _ = make_kab2_bytes(num_moves=6, seed=11)
+        raw = make_stream_frame(b'B', 'g', buf) + b'\x00'
+        proc = mock.MagicMock()
+        proc.stdout = io.BytesIO(raw)
+        proc.stderr = io.BytesIO(b'')
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        with mock.patch('katarank.engine.subprocess.Popen', return_value=proc) as popen:
+            list(engine.stream_games(sgf_strings=['(;GM[1]SZ[19];B[pd];W[dp])'], **kwargs))
+        return popen.call_args.kwargs['creationflags']
+
+    def test_one_shot_runs_at_batch_priority(self):
+        from katarank._priority import BATCH_FLAGS
+        self.assertEqual(self._spawned_flags(self._engine(), mode='lite'), BATCH_FLAGS)
+
+    def test_daemon_mode_fallback_runs_at_on_demand_priority(self):
+        # A request for the mode the daemon does not run spawns a one-shot process for a
+        # waiting caller; at BATCH priority it starved behind training and timed out.
+        from katarank._priority import ON_DEMAND_FLAGS
+        from katarank.engine import PersistentKataGoEngine
+        with mock.patch('katarank.katago_setup.discover_katago', return_value='dummy'):
+            engine = PersistentKataGoEngine(model='dummy.bin.gz', katago_bin='dummy', mode='lite')
+        with self.assertLogs('katarank.engine', level='WARNING'):
+            flags = self._spawned_flags(engine, mode='full')
+        self.assertEqual(flags, ON_DEMAND_FLAGS)
+
 
 # ─── SGF metadata ─────────────────────────────────────────────────────────────
 
