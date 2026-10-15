@@ -20,7 +20,6 @@ Usage::
 
 from typing import Iterator, List, Optional, Union
 
-import numpy as np
 from torch.utils.data import IterableDataset
 
 from katarank.engine import KataGoEngine

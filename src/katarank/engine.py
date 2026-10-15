@@ -48,7 +48,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import zlib
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Generator, Iterable, List, Optional, Tuple, Union
@@ -58,90 +57,15 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+# KAB2 codec lives in katarank.data.preprocess; re-exported for the public API.
+from katarank.data.preprocess import build_kab2_payload, parse_kab2_buffer  # noqa: F401
+
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
-
-# ─── KAB2 constants ──────────────────────────────────────────────────────────
-
-_MAGIC          = b'KAB2'
-_HEADER_SIZE    = 96
-_SUMMARY_OFFSET = 32
-
-# PlayerSummary field indices
-_SUM_MEAN_LP      = 2
-_SUM_HUMAN_RANK   = 10
-_SUM_HUMAN_LP     = 11
 
 # Stream protocol: [1B side][4B uint32 idLen][game id][4B uint32 size][payload]
 _TERMINATOR = b'\x00'   # daemon/process exit
 _JOB_DONE   = b'\x01'   # end of one daemon job
-
-
-# ─── Low-level KAB2 builder (ndarray → bytes) ───────────────────────────────
-
-def build_kab2_payload(moves: np.ndarray, info: dict) -> bytes:
-    """Reconstruct a KAB2 binary payload from parsed moves + info.
-
-    Inverse of parse_kab2_buffer(). Produces uncompressed KAB2 suitable
-    for writing into combined .npz files.
-    """
-    num_moves = moves.shape[0]
-    input_dim = moves.shape[1] if num_moves > 0 else info.get('input_dim', 10)
-    scalar_dim = info.get('scalar_dim', min(input_dim, 10))
-    trunk_dim = info.get('trunk_dim', (input_dim - scalar_dim) // 2)
-
-    summary = list(info.get('summary', [0.0] * 16))
-    if len(summary) < 16:
-        summary.extend([0.0] * (16 - len(summary)))
-    summary[_SUM_MEAN_LP] = info.get('mean_log_prior', summary[_SUM_MEAN_LP])
-    hr = info.get('human_rank_idx', -1)
-    summary[_SUM_HUMAN_RANK] = float(hr)
-    summary[_SUM_HUMAN_LP] = info.get('human_log_prior', summary[_SUM_HUMAN_LP])
-
-    header = struct.pack(
-        '<4s7i', _MAGIC, num_moves, scalar_dim, trunk_dim,
-        trunk_dim, 19, 19, 0,  # flags=0 (uncompressed)
-    )
-    header += struct.pack('<16f', *summary[:16])
-
-    payload = moves.astype(np.float32).tobytes() if num_moves > 0 else b''
-    return header + payload
-
-
-# ─── Low-level KAB2 parser (bytes → ndarray) ──────────────────────────────────
-
-def parse_kab2_buffer(data: bytes) -> Tuple[np.ndarray, Dict]:
-    """Parse a KAB2 payload from raw bytes (in-memory, no file I/O)."""
-    if data[:4] != _MAGIC:
-        raise ValueError(f"Not a KAB2 buffer (magic={data[:4]!r})")
-
-    num_moves  = struct.unpack_from('<i', data, 4)[0]
-    scalar_dim = struct.unpack_from('<i', data, 8)[0]
-    trunk_dim  = struct.unpack_from('<i', data, 12)[0]
-    flags      = struct.unpack_from('<i', data, 28)[0]
-    summary    = struct.unpack_from('<16f', data, _SUMMARY_OFFSET)
-
-    payload = data[_HEADER_SIZE:]
-    if flags & 1:
-        clen = struct.unpack_from('<I', payload, 0)[0]
-        payload = zlib.decompress(payload[4: 4 + clen])
-
-    move_dim = scalar_dim + 2 * trunk_dim
-    moves = np.frombuffer(payload, dtype=np.float32).reshape(num_moves, move_dim).copy()
-    moves = np.ascontiguousarray(moves)   # ensure writable copy
-
-
-
-    return moves, {
-        'num_moves':       num_moves,
-        'scalar_dim':      scalar_dim,
-        'trunk_dim':       trunk_dim,
-        'input_dim':       move_dim,
-        'mean_log_prior':  summary[_SUM_MEAN_LP],
-        'human_rank_idx':  int(summary[_SUM_HUMAN_RANK]) if summary[_SUM_HUMAN_RANK] >= 0 else -1,
-        'human_log_prior': summary[_SUM_HUMAN_LP],
-        'summary':         summary,
-    }
 
 
 # ─── Input type ──────────────────────────────────────────────────────────────

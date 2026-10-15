@@ -1,7 +1,6 @@
 # KataRank project ignores
 
 # Temporary analysis data
-_stress_test/
 scripts/stress_report.json
 
 # KataGo binary — download from ahillzhao-msn/KataGo/releases, place in src/katarank/bin/
