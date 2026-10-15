@@ -18,7 +18,7 @@ import zlib
 import numpy as np
 import torch
 
-from katarank.engine import KataGoEngine, parse_kab2_buffer
+from katarank.engine import KataGoEngine, build_kab2_payload, parse_kab2_buffer
 from katarank.schema import (
     KAB2Sample, kab2_make_sample, kab2_collate, rank_idx_to_str, RANK_NAMES,
 )
@@ -42,6 +42,7 @@ def make_kab2_bytes(
     human_lp: float = -3.0,
     compress: bool = False,
     seed: int = 0,
+    anchor: tuple | None = None,
 ):
     """Synthesize a KAB2 payload matching batch_analysis.cpp output."""
     rng = np.random.default_rng(seed)
@@ -52,6 +53,8 @@ def make_kab2_bytes(
     summary[2]  = mean_lp
     summary[10] = human_rank
     summary[11] = human_lp
+    if anchor is not None:  # (rank_exp, rank_sd, n_profiles, version) — anchor v2
+        summary[12:16] = anchor
 
     header = struct.pack(
         '<4s7i', b'KAB2', num_moves, scalar_dim, trunk_dim,
@@ -112,6 +115,32 @@ class TestKAB2Parsing(unittest.TestCase):
         parsed, info = parse_kab2_buffer(buf)
         self.assertEqual(info['input_dim'], 10 + 2 * 4)
         self.assertEqual(parsed.shape, (6, 18))
+
+    def test_parse_buffer_is_writable(self):
+        buf, _ = make_kab2_bytes()
+        parsed, _ = parse_kab2_buffer(buf)
+        parsed[0, 0] = 1.0  # callers normalize in place
+
+    def test_anchor_v2_fields(self):
+        buf, _ = make_kab2_bytes(human_rank=14.0, anchor=(13.6, 1.2, 5.0, 2.0))
+        _, info = parse_kab2_buffer(buf)
+        self.assertEqual(info['human_rank_idx'], 14)
+        self.assertEqual(info['human_anchor_ver'], 2)
+        self.assertAlmostEqual(info['human_rank_exp'], 13.6, places=5)
+        self.assertAlmostEqual(info['human_rank_sd'], 1.2, places=5)
+
+    def test_legacy_file_has_no_anchor_v2_fields(self):
+        buf, _ = make_kab2_bytes()
+        _, info = parse_kab2_buffer(buf)
+        self.assertEqual(info['human_anchor_ver'], 0)
+        self.assertIsNone(info['human_rank_exp'])
+
+    def test_build_parse_roundtrip(self):
+        buf, moves = make_kab2_bytes(num_moves=7, trunk_dim=3)
+        parsed, info = parse_kab2_buffer(buf)
+        again, info2 = parse_kab2_buffer(build_kab2_payload(parsed, info))
+        np.testing.assert_array_equal(again, moves)
+        self.assertEqual(info2['human_rank_idx'], info['human_rank_idx'])
 
     def test_human_rank_unset(self):
         buf, _ = make_kab2_bytes(human_rank=-1.0)
