@@ -218,6 +218,14 @@ class AnalysisDaemon:
             if fut is None:
                 logger.debug('AnalysisDaemon orphan response id=%r', qid)
                 continue
+            # A query KataGo rejects (e.g. "Illegal move 274: N4") gets one
+            # error line instead of one line per analyzeTurns entry — fail
+            # it now rather than waiting out the full timeout for the rest.
+            if 'error' in obj and 'turnNumber' not in obj:
+                with self._pending_lock:
+                    self._pending.pop(qid, None)
+                fut.fail(RuntimeError(f"KataGo rejected query: {obj['error']}"))
+                continue
             fut.add(obj)
 
         # Process exited — fail all pending futures
