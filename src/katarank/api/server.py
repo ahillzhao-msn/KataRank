@@ -145,6 +145,7 @@ def create_app(
     persistent: bool = True,
     engine_mode: str = 'lite',
     kab2_cache: Optional[str] = None,
+    inference_humansl: bool = False,
 ) -> 'FastAPI':
     """
     Create and configure the FastAPI application.
@@ -168,6 +169,12 @@ def create_app(
                          a fresh process per request (model reload each time).
         engine_mode:     Daemon analysis mode, 'lite' or 'full'. Requests
                          asking for the other mode fall back to one-shot.
+        inference_humansl: Also run the HumanSL pass in the batch engine. Off by
+                         default: HumanSL rank is the training anchor (KAB2 for
+                         training is generated offline with it); inference uses
+                         the trained model's rank, so the pass is wasted work.
+                         The online analysis daemon keeps the human model
+                         regardless (variation queries use human profiles).
     """
     _require_fastapi()
     import threading
@@ -186,11 +193,12 @@ def create_app(
     # ── Shared state ──────────────────────────────────────────────────────────
 
     # Batch analysis daemon (KAB2 protocol) — one GPU job at a time via engine_sem
+    engine_human_model = human_model if inference_humansl else None
     if persistent:
         engine = PersistentKataGoEngine(
             model       = katago_model,
             config      = katago_config,
-            human_model = human_model,
+            human_model = engine_human_model,
             katago_bin  = katago_bin,
             mode        = engine_mode,
         )
@@ -199,7 +207,7 @@ def create_app(
         engine = KataGoEngine(
             model       = katago_model,
             config      = katago_config,
-            human_model = human_model,
+            human_model = engine_human_model,
             katago_bin  = katago_bin,
         )
 
@@ -595,6 +603,7 @@ _CONFIG_TEMPLATE = """\
 # checkpoint_lite = ""            # KataRank lite .pt checkpoint (10-dim, distilled)
 # config = ""                     # KataGo analysis .cfg (auto-generated)
 # human_model = ""                # HumanSL model (optional)
+# inference_humansl = false       # also run HumanSL in the batch engine (training anchor only)
 # host = "127.0.0.1"
 # port = 8765
 # engine_mode = "lite"            # lite | full — default mode for requests
@@ -697,6 +706,7 @@ def main():
         persistent      = not args.no_persistent,
         engine_mode     = _get(args.engine_mode,     'engine_mode', 'lite'),
         kab2_cache      = _get(None,                 'kab2_cache'),
+        inference_humansl = bool(_get(None,          'inference_humansl', False)),
     )
     uvicorn.run(
         app,
