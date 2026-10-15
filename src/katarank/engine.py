@@ -48,7 +48,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import zlib
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Generator, Iterable, List, Optional, Tuple, Union

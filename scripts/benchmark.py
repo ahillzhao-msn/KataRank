@@ -124,14 +124,14 @@ def main():
         if not args.human_model:
             print('No human model found — rank info may show -1')
 
-    print(f'KataRank Pipeline Benchmark')
-    print(f'=' * 60)
+    print('KataRank Pipeline Benchmark')
+    print('=' * 60)
     print(f'SGF dir:        {args.sgf_dir}')
     print(f'Games/group:    {args.games}')
     print(f'Human model:    {args.human_model or "(none)"}')
 
     # 1. Collect SGFs
-    print(f'\n─── Step 1: Collecting SGFs ───')
+    print('\n─── Step 1: Collecting SGFs ───')
     all_sgfs = find_sgfs(args.sgf_dir, args.games)
     if not all_sgfs:
         print('ERROR: no SGFs found!')
@@ -150,7 +150,7 @@ def main():
     ]
 
     results = {}
-    print(f'\n─── Step 2: Data Generation (4 modes) ───')
+    print('\n─── Step 2: Data Generation (4 modes) ───')
 
     for label, use_stream, no_trunk in modes:
         out_dir = os.path.join(base_dir, label)
@@ -185,7 +185,7 @@ def main():
         }
 
     # 3. Cross-mode comparison
-    print(f'\n─── Step 3: Consistency Check ───')
+    print('\n─── Step 3: Consistency Check ───')
 
     # Compare file_full vs stream_full content hashes
     ff_samples = results.get('file_full', {}).get('samples', [])
@@ -207,7 +207,7 @@ def main():
     print(f'  Lite input_dim: {fl_samples[0]["input_dim"] if fl_samples else "N/A"}')
 
     # Rank distribution check
-    print(f'\n─── Step 4: 29-dim Rank Distribution ───')
+    print('\n─── Step 4: 29-dim Rank Distribution ───')
     rank_counts = {}
     for label, samples in [('file_full', ff_samples), ('stream_full', sf_samples)]:
         for s in samples:
@@ -231,7 +231,7 @@ def main():
             print(f'  {label:15s}: top ranks = {top}')
 
     # 4. Report
-    print(f'\n─── Summary ───')
+    print('\n─── Summary ───')
     for label in ['file_full', 'file_lite', 'stream_full', 'stream_lite']:
         r = results.get(label, {})
         print(f'  {label:15s}: {r.get("games",0)} games  {r.get("time_s",0)}s  '

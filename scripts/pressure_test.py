@@ -8,7 +8,7 @@ Two groups of 25 games (20 train + 5 inference each)
 
 Outputs timing + convergence metrics for comparison.
 """
-import os, sys, random, time, shutil, json, subprocess
+import os, sys, random, time, json, subprocess
 from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -77,7 +77,7 @@ def run_training(data_dir: str, label: str, hidden_dim: int, epochs: int) -> flo
     """Run KAB2 training and return elapsed seconds."""
     import torch
     from katarank.model import KataRankModel, KataRankLoss
-    from katarank.data.datasets import KAB2Dataset, make_kab2_loader
+    from katarank.data.datasets import make_kab2_loader
     from katarank.train.training import Trainer, evaluate_metrics
     
     meta_csv = os.path.join(data_dir, '_meta.csv')
@@ -117,7 +117,6 @@ def run_training(data_dir: str, label: str, hidden_dim: int, epochs: int) -> flo
 
 def run_inference(sgfs, label: str, mode: str, checkpoint: str, out_dir: str) -> float:
     """Run inference on held-out SGFs and return elapsed seconds."""
-    import torch
     from katarank.engine import KataGoEngine
     from katarank.model import KataRankModel
     from katarank.workflow import run_rank_files, InferenceWorkflow

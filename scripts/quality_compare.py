@@ -21,7 +21,6 @@ SGF_DIR = os.environ.get('KATARANK_SGF_CORPUS', os.path.expanduser('~/sgf-corpus
 WORK   = os.path.expanduser('~/katarank/_stress_test')
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from katarank.data.datasets import make_kab2_loader
 from katarank.model import KataRankModel, KataRankLoss

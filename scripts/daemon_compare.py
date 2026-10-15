@@ -21,12 +21,11 @@ SGF_DIR = os.environ.get('KATARANK_SGF_CORPUS', os.path.expanduser('~/sgf-corpus
 WORK   = os.path.expanduser('~/katarank/_stress_test')
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from katarank.engine import PersistentKataGoEngine
 from katarank.model import KataRankModel, KataRankLoss
-from katarank.workflow import TrainingWorkflow, InferenceWorkflow, run_rank_files, result_to_output
-from katarank.schema import KAB2Output, rank_idx_to_str
+from katarank.workflow import TrainingWorkflow, InferenceWorkflow, run_rank_files
+from katarank.schema import rank_idx_to_str
 
 def pick_sgfs(n: int = 50) -> list:
     level_dirs = sorted(Path(SGF_DIR).iterdir())
@@ -192,7 +191,7 @@ def main():
     print(f"  {'Inference time':<25} {f['infer_elapsed']}s{'':<16} {l['infer_elapsed']}s")
     
     # Compare per-game ratings
-    print(f"\n  Per-game rating comparison:")
+    print("\n  Per-game rating comparison:")
     print(f"  {'Game':<30} {'FULL B/W rating':<24} {'LITE B/W rating':<24} {'Agree?':<10}")
     for rf, rl in zip(f['results'], l['results']):
         agree = rf['b_rank'] == rl['b_rank'] and rf['w_rank'] == rl['w_rank']

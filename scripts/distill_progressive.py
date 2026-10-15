@@ -14,7 +14,6 @@ import time
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -23,7 +22,7 @@ from katarank.model import KataRankModel
 from katarank.data.datasets.dataset_kab2 import KAB2Dataset
 from katarank.schema import kab2_collate
 from katarank.train.distill import (
-    DistillationLoss, DistillationDataset, DistillTrainer,
+    DistillationLoss, DistillTrainer,
     distill_collate, generate_teacher_targets,
 )
 from katarank.train.training import evaluate_metrics
