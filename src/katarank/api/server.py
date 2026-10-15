@@ -137,6 +137,7 @@ def create_app(
     checkpoint_path: Optional[str] = None,
     checkpoint_lite: Optional[str] = None,
     katago_bin: Optional[str] = None,
+    analysis_bin: Optional[str] = None,
     katago_config: Optional[str] = None,
     human_model: Optional[str] = None,
     device: Optional[str] = None,
@@ -153,7 +154,12 @@ def create_app(
         katago_model:    Path to KataGo model (.bin.gz)
         checkpoint_path: Full KataRankModel checkpoint (.pt, input_dim=1034)
         checkpoint_lite: Lite KataRankModel checkpoint (.pt, input_dim=10)
-        katago_bin:      KataGo binary; auto-detected if None
+        katago_bin:      KataGo binary for the batch (KAB2) engine — must be the
+                         custom fork (batch_analysis); auto-detected if None
+        analysis_bin:    KataGo binary for the JSON analysis daemon; defaults to
+                         katago_bin. Any stock build works here; TensorRT is ~20%
+                         faster than the fork's OpenCL Release build on /review
+                         queries (1.83 s vs 2.25 s for a 250-move game, 2026-10-14).
         device:          'cpu', 'cuda', or None for auto
         max_concurrency: Max simultaneous katago analyses (default 1 = serialize)
         sgf_root:        If set, /rank/file and /rank/directory only accept
@@ -201,7 +207,7 @@ def create_app(
     # Online analysis daemon (JSON protocol) — separate process to avoid
     # blocking interactive queries behind long batch jobs on the GPU.
     analysis_daemon = AnalysisDaemon(
-        katago_bin  = engine.katago_bin,
+        katago_bin  = analysis_bin or engine.katago_bin,
         model       = katago_model,
         config      = katago_config,
         human_model = human_model,
@@ -584,7 +590,8 @@ _CONFIG_TEMPLATE = """\
 
 [katarank]
 # model = "C:/Users/you/.katago/models/kata1-b18c384nbt.bin.gz"
-# katago_bin = ""                 # auto-discovered from ~/katago-fork/cpp/
+# katago_bin = ""                 # custom-fork batch engine; auto-discovered from ~/katago-fork/cpp/
+# analysis_bin = ""               # JSON analysis daemon binary (stock KataGo OK); defaults to katago_bin
 # checkpoint = ""                 # KataRank full .pt checkpoint (1034-dim)
 # checkpoint_lite = ""            # KataRank lite .pt checkpoint (10-dim, distilled)
 # config = ""                     # KataGo analysis .cfg (auto-generated)
@@ -682,6 +689,7 @@ def main():
         checkpoint_path = _get(args.checkpoint,      'checkpoint'),
         checkpoint_lite = _get(args.checkpoint_lite, 'checkpoint_lite'),
         katago_bin      = _get(args.katago_bin,      'katago_bin'),
+        analysis_bin    = _get(None,                 'analysis_bin'),
         katago_config   = _get(args.config,          'config'),
         human_model     = _get(args.human_model,     'human_model'),
         device          = _get(args.device,          'device'),
