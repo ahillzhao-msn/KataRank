@@ -45,7 +45,6 @@ Typical usage:
 import os
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 from collections import deque
@@ -57,10 +56,9 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from katarank._priority import BATCH_FLAGS, INTERACTIVE_FLAGS, ON_DEMAND_FLAGS
 # KAB2 codec lives in katarank.data.preprocess; re-exported for the public API.
 from katarank.data.preprocess import build_kab2_payload, parse_kab2_buffer  # noqa: F401
-
-_CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 
 # Stream protocol: [1B side][4B uint32 idLen][game id][4B uint32 size][payload]
@@ -224,7 +222,7 @@ class KataGoEngine:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=BATCH_FLAGS,
         )
 
         # Drain stderr in a background thread: katago writes progress there,
@@ -364,7 +362,7 @@ class KataGoEngine:
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=_CREATE_NO_WINDOW,
+                creationflags=INTERACTIVE_FLAGS,
             )
             stdout, _ = proc.communicate(
                 input=(_json.dumps(query) + '\n').encode('utf-8'),
@@ -548,7 +546,7 @@ class PersistentKataGoEngine(KataGoEngine):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            creationflags=_CREATE_NO_WINDOW,
+            creationflags=ON_DEMAND_FLAGS,
         )
 
         ready = threading.Event()
