@@ -18,6 +18,7 @@ Usage:
     uv run python scripts/auto_train.py --force        # train regardless of threshold
     uv run python scripts/auto_train.py --threshold 5000
     uv run python scripts/auto_train.py --rebuild-cache  # regenerate all KAB2 from scratch
+    uv run python scripts/auto_train.py --force --fresh  # train from scratch (no resume)
 """
 
 from __future__ import annotations
@@ -575,6 +576,9 @@ def main():
                         help="PostgreSQL connection string")
     parser.add_argument("--resume", default=None,
                         help="Resume training from this checkpoint")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Train from scratch instead of resuming from nets/katarank/best.pt "
+                             "(use when features or labels changed, e.g. a KAB2 format/anchor change)")
     parser.add_argument("--register", action="store_true",
                         help="Register existing checkpoint to model_versions (no training)")
     parser.add_argument("--rebuild-meta", action="store_true",
@@ -683,7 +687,9 @@ def main():
         # ── Step 5: Train ───────────────────────────────────────────────────
         log.info("=== Step 5/5: Training KataRank model ===")
         resume = args.resume
-        if not resume:
+        if args.fresh and resume:
+            parser.error("--fresh and --resume are mutually exclusive")
+        if not resume and not args.fresh:
             candidate = PROJECT_ROOT / "nets" / "katarank" / "best.pt"
             if candidate.exists():
                 resume = str(candidate)
