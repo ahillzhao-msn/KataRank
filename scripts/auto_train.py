@@ -48,6 +48,8 @@ DB_DSN = "host=localhost port=5432 dbname=gopredict user=gopredict password=gopr
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KATARANK_TRAIN = [sys.executable, "-m", "katarank.train.training"]
+KATARANK_DISTILL = [sys.executable, "-m", "katarank.train.distill"]
+START_SCRIPT = PROJECT_ROOT / "scripts" / "start-katarank.ps1"
 
 _TOML_PATH = Path.home() / ".katarank" / "server.toml"
 
@@ -504,6 +506,45 @@ def _load_training_report(ckpt_dir: Path) -> dict | None:
     return json.loads(report.read_text(encoding="utf-8"))
 
 
+def restart_engine(katarank_url: str = "http://127.0.0.1:8765") -> bool:
+    """Reload the running katarank-server so a newly-promoted checkpoint
+    (full OR lite) actually gets served.
+
+    IMPORTANT: this is a full process restart, not a lighter-weight call.
+    `POST /engine/restart` (see api/server.py) only restarts the katago
+    analysis daemon subprocess — it does NOT reload the PyTorch
+    KataRankModel weights, which api/server.py's create_app() loads once
+    at process startup and never again. A promotion that only hits that
+    endpoint leaves the just-promoted checkpoint sitting correctly on disk
+    while the running process keeps serving the OLD weights from memory
+    indefinitely, with no visible error (confirmed by hand while fixing
+    the missing optimizer_state.pt issue — see GOPredict conversation).
+    start-katarank.ps1 -Restart is the only thing that actually works:
+    it kills and respawns the server process, which re-reads whatever is
+    currently on disk.
+    """
+    if not START_SCRIPT.exists():
+        log.warning("start-katarank.ps1 not found at %s — checkpoint is on disk "
+                    "but the running server still has the old weights loaded "
+                    "until it's restarted some other way.", START_SCRIPT)
+        return False
+    try:
+        result = subprocess.run(
+            ["powershell", "-File", str(START_SCRIPT), "-Restart"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            log.warning("start-katarank.ps1 -Restart exited %d: %s",
+                       result.returncode, result.stdout + result.stderr)
+            return False
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.warning("Engine restart failed (%s) — checkpoint is on disk but "
+                    "the running server still has the old weights loaded "
+                    "until it's restarted some other way.", e)
+        return False
+
+
 def _git_commit() -> str:
     """Current HEAD short hash, or empty."""
     try:
@@ -541,14 +582,19 @@ def record_training_run(conn, ckpt_path: Path, num_games: int):
     commit = _git_commit()
 
     with conn.cursor() as cur:
+        # mode='full': this script only ever produces the full (1034-dim)
+        # checkpoint. Without it the INSERT falls back to the column's
+        # server_default('lite'), mislabeling a full-model run as lite —
+        # scope the deactivation the same way so it doesn't flip off
+        # whatever lite model happens to be active.
         cur.execute("""
-            UPDATE model_versions SET active = false WHERE active = true
+            UPDATE model_versions SET active = false WHERE active = true AND mode = 'full'
         """)
         cur.execute("""
             INSERT INTO model_versions
-                (version, artifact_path, architecture, feature_version,
+                (version, artifact_path, architecture, feature_version, mode,
                  num_training_games, metrics, git_commit, notes, active, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true, now())
+            VALUES (%s, %s, %s, %s, 'full', %s, %s, %s, %s, true, now())
         """, (
             version,
             str(ckpt_path),
