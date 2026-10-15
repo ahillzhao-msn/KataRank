@@ -707,6 +707,10 @@ def main():
 
             n_exported = export_sgfs_by_ids(conn, new_ids, sgf_dir)
             log.info("Exported %d new SGFs", n_exported)
+            # End the read-only transaction before hours of GPU work: an 'idle in
+            # transaction' connection holds locks on games for the whole session, so
+            # any migration (ALTER TABLE) blocks — and then queues every later query.
+            conn.commit()
 
             if n_exported == 0:
                 log.warning("No SGFs exported — skipping KAB2 generation")

@@ -302,6 +302,10 @@ def main():
             work_dir = Path(tempfile.mkdtemp(prefix="katarank_incr_"))
             sgf_dir, new_kab2_dir = work_dir / "sgfs", work_dir / "kab2"
             n_exported = at.export_sgfs_by_ids(conn, new_ids, sgf_dir)
+            # End the read-only transaction before hours of GPU work: an 'idle in
+            # transaction' connection holds locks on games for the whole session, so
+            # any migration (ALTER TABLE) blocks — and then queues every later query.
+            conn.commit()
             if n_exported:
                 _phase("generating_kab2", new_games=n_exported)
                 at.generate_kab2(sgf_dir, new_kab2_dir, katago_cfg)
@@ -320,6 +324,7 @@ def main():
             cur.execute("SELECT metrics->>'best_val_loss' FROM model_versions "
                         "WHERE active = true AND mode = 'full'")
             row = cur.fetchone()
+        conn.commit()  # same reason as after the export: training runs for hours
         live_val_loss = float(row[0]) if row and row[0] is not None else None
 
         _phase("training", staging_dir=str(CANDIDATE_DIR), from_scratch=args.from_scratch,
