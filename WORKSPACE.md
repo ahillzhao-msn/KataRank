@@ -69,8 +69,9 @@ Check it's up:
 curl http://localhost:8765/health
 ```
 
-GoPredict (in WSL Docker) reaches it at `http://host.docker.internal:8765` by default;
-override with `GOPREDICT_KATARANK_URL` in GoPredict's `.env`.
+GoPredict's containers (WSL Docker) reach it through `KATARANK_HOST_URL` in GoPredict's
+`.env` (default `http://winhost:8765`, where `winhost` is the WSL gateway). GoPredict's
+`scripts/refresh-katarank-env.sh` keeps that `.env` entry pointed at the current gateway.
 
 ---
 
