@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from katarank.engine import KataGoEngine
 from katarank.schema import save_outputs_batch, rank_idx_to_str

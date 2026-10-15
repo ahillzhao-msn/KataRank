@@ -114,28 +114,38 @@ uv run python scripts/validate_split.py --meta data/kab2/_meta.csv
 
 ### 3.2 训练命令
 
+**生产训练走 GOPredict 发起的带闸门训练会话**：
+
+```
+GOPredict  POST /api/v1/models/train?force=true[&from_scratch=true]   （导入页按钮）
+  → KataRank POST /train/start → scripts/train_session.py [--force] [--from-scratch]
+```
+
+会话的第 1–4 步复用 `scripts/auto_train.py`：
+1. 导出缺 KAB2 的棋局；
+2. 用 `batch_analysis` 生成 KAB2。二进制取自 `~/.katarank/server.toml` 的 `katago_bin`，并带上 `-human-model`；
+3. 并入 `~/.katarank/kab2_cache`；
+4. `rebuild_meta`，并做分层 T/V 划分。
+
+之后训练进暂存区 `nets/_candidate/`，在**同一份 holdout** 上评估候选模型与线上模型。候选更好才
+晋升：复制到 `nets/katarank/`，写入 `model_versions`（active），并重启服务。否则丢弃，只留一行
+`active=false` 的审计记录。特征或标签变了（KAB2 格式、HumanSL 锚点变更）时用
+`from_scratch=true`；默认从线上 checkpoint 续训。进度用 `GET /api/v1/models/train/status` 查看。
+
+`scripts/auto_train.py` 单独运行时会跳过评估闸门，**直接覆盖 `nets/katarank/best.pt` 并登记为 active**。
+只在明确要绕过闸门时使用。
+
+**直接调用训练模块**（实验用；注意默认 `checkpoint_dir` 就是线上的 `nets/katarank`）：
+
 ```bash
-# 从头训练
-uv run katarank-train --config src/katarank/train/config_phase2.yaml
-
-# 继续训练（resume）
-uv run katarank-train --config src/katarank/train/config_phase2.yaml \
-  --resume nets/katarank/best.pt
-
-# 覆盖超参
-uv run katarank-train --config config.yaml \
-  --epochs 200 --lr 0.0003 --batch-size 64
+uv run katarank-train --config src/katarank/train/config_kata_native.yaml   --data-dir ~/.katarank/kab2_cache [--resume nets/katarank/best.pt]   [--epochs 200 --lr 0.0003 --batch-size 64]
 ```
 
 ### 3.3 训练后
 
-```bash
-# 生成评估报告
-uv run python scripts/evaluate.py --checkpoint nets/katarank/best.pt
-
-# 写入训练日志
-# 手动更新 docs/training_log.md
-```
+训练模块在 checkpoint 旁写出 `training_report.json`（loss 曲线、rank MAE/accuracy、
+rating 相关、序数阈值）；`auto_train.py` 把其中的指标连同 git commit 记入 `model_versions`。
+随后在 `docs/training_log.md` 追加一条实验记录（模板见第五节）。
 
 ---
 
@@ -171,33 +181,14 @@ uv run python scripts/evaluate.py --checkpoint nets/katarank/best.pt
 2. 两端段的评估置信度低（样本量决定置信度），独立验证集的收益微乎其微
 3. 验证 loss 主要由主流段位驱动，两端段的贡献可以忽略
 
-### 4.2 分层算法
+### 4.2 分层算法（实际实现）
 
-```python
-def stratified_split(df, val_ratio=0.1, main_bands=[1, 2, 3]):
-    """按段位 band 分层分割训练/验证集。
-    
-    两端 band（稀疏段位）不拆分，全部用于训练。
-    main_bands 中的 band 执行严格分层随机分割。
-    """
-    df = df.copy()
-    df['band'] = pd.cut(df['human_rank_idx'], bins=5, labels=False)
-    
-    train_list, val_list = [], []
-    for band in range(5):
-        band_df = df[df['band'] == band]
-        if band in main_bands:
-            # 主流段位：分层分割
-            val_count = max(1, int(len(band_df) * val_ratio))
-            val_idx = band_df.sample(n=val_count, random_state=42).index
-            train_list.append(band_df.drop(val_idx))
-            val_list.append(band_df.loc[val_idx])
-        else:
-            # 两端段位：全部用于训练
-            train_list.append(band_df)
-    
-    return pd.concat(train_list), pd.concat(val_list)
-```
+实现位于 `scripts/auto_train.py:assign_train_val_split`（第 4.1 节是设计取向，以代码为准）：
+
+1. 已在验证集（`set == "V"`）的棋局**保持不变**，保证历次训练的验证集可比；
+2. 目标验证集规模 = 总数 × 10%；不足部分从其余棋局中补；
+3. 补充按「较强一方的 `humanRank`」分组，**按各组规模比例**分配名额（两端稀疏段位也参与，
+   名额按比例自然很少），零头按最大余数法分配；随机种子固定为 42。
 
 ---
 
@@ -237,5 +228,6 @@ def stratified_split(df, val_ratio=0.1, main_bands=[1, 2, 3]):
 
 1. **分段位评估置信度不同** — 主流段位（样本充足）评估可信，两端段位（样本稀疏）评估仅作参考
 2. **_meta.csv 是派生视图** — `auto_train.py` 训练前自动从 .npz 重建（`rebuild_meta`），无需手动维护
-3. **20k, 19k-15k 段位无标签** — 数据中不存在这些段位的棋谱，模型无法学会预测
+3. **两端段位样本稀少** — 段位标签来自 HumanSL 锚点（见 MODEL_V3_ARCHITECTURE.md §6.6），
+   极弱/极强两端的棋局很少，模型在两端的预测仅作参考
 4. **训练日志手动维护** — 可以考虑自动化记录

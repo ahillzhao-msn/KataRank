@@ -186,6 +186,42 @@ Epoch 6-150: Cosine annealing  lr → lr_min (1e-5)
 
 ---
 
+### 2.4 审计：Phase 2 训练数据的两处缺陷 (2026-10-14)
+
+复核 Phase 2 Teacher（2.3）与 Lite（3.4）时发现，其训练数据存在两处缺陷，**两者报告的指标
+都不能当作模型能力的度量**。原 checkpoint 与报告保留在 `nets/` 中，未作改动；此处只作记录。
+
+受影响的还有此后的所有线上版本，因为它们都在同一批数据上训练（见 GOPredict `model_versions` 表）：
+- Full v20260811_022603：31,362 局，rank_acc 69.1%，±1 95.9%。由 v20260620_full_001 续训，手动放行晋升。
+- Lite v20260620_000321：rank_acc 62.0%，±1 94.8%。
+
+**缺陷 1 — trunk 全为 0。** 自 fork 提交 15a5bced（2026-06-09）起，`includeTrunk` 没有从请求
+传到后端，OpenCL 读回又忽略了 FP16 tensor core 的 padding（368 而非 361），所以 KAB2 的
+trunk/pick 列全部为 0。`kab2_cache` 的 3.1 万个文件与 `data/kab2` 的 1.5 万个文件都是如此。
+Teacher 输入层 trunk 列的权重范数约 0.2，标量列约 1.07，即 trunk 部分基本没有被训练。
+已修复于 KataGo#1。
+
+**缺陷 2 — HumanSL 段位标签实质上是一个公式。** 旧锚点只在公式
+`mid = (meanLogPrior + 5.9) / 5.4 × 28` 附近测 3 档并取 argmax。在 62,732 名棋手中，89.0% 落在
+窗口上沿（mid+1）。仅凭这个公式猜 V 集标签，精确命中 89.5%、±1 命中 96.0%，而 Teacher 报告的
+是 69.0% / 96.4%。rating 目标 `meanLogPrior` 本身又是输入标量第 5 列取对数后的均值。所以两个
+训练目标都近似是输入标量的确定性函数，这也解释了 trunk 为 0 时模型照样显得「准确」。
+已由锚点 v2 修复（KataGo#2，见 MODEL_V3_ARCHITECTURE.md §6.6）：
+- 主模型守门：每位棋手只取目差损失处于 10%–90% 分位的着法；
+- HumanSL 用 5 个固定档位；
+- 样条插值得到后验，取均值；
+- 在 160 名棋手上，折半信度与全扫相同（r 0.78 vs 0.78）。
+
+**一并修复：**
+- StratifiedRankSampler 的 bucket 重洗原先洗的是副本（#4）；
+- batch_analysis 的 NN 缓存会驻留每个带 trunk 的结果，内存每盘多约 0.17 GB（KataGo#2）。
+
+**处理：** 用修复后的二进制，对数据库全部 32,358 局重新生成 KAB2，然后从头重训。入口走标准的
+带闸门训练会话：GOPredict `POST /api/v1/models/train?force=true&from_scratch=true` →
+KataRank `/train/start` → `scripts/train_session.py --force --from-scratch`。会话在暂存区训练，
+在同一 holdout 上与线上模型比较，胜出才晋升。旧缓存移至 `~/.katarank/kab2_cache_v1_zerotrunk`：其中
+标量列与新二进制逐位一致，trunk 为 0，标签为旧锚点。
+
 ## 3. V2 Lite Model — 知识蒸馏
 
 ### 3.1 动机
@@ -291,18 +327,18 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 | rank_mae | 2.76 | 0.542 | **0.350** | **0.438** |
 | rating_corr | 0.449 | 0.993 | **0.995** | **0.992** |
 
+> 以上各列的训练数据 trunk 均为 0，段位标签均来自旧的 3 档窗口锚点（见 2.4）。这些数字衡量的是
+> 模型复现「标量 → 公式」的程度，**不是**棋力评估能力，不能和锚点 v2 之后的结果直接比较。
+
 ---
 
 ## 5. 数据管道状态
 
 ### 5.1 KAB2 缓存
 
-| 指标 | 数量 |
-|------|------|
-| 已缓存 (KAB2 .npz) | ~30,245 |
-| 训练集 (T split) | 27,223 |
-| 验证集 (V split) | 3,022 |
-| 全部含 HumanSL 标签 | 30,245 / 30,245 |
+2026-10-14 起，`~/.katarank/kab2_cache` 由带闸门训练会话（`train_session.py --force --from-scratch`）
+对数据库全部 32,358 局重新生成（真实 trunk + 锚点 v2），T/V 划分重新分层。旧缓存（Phase 2 用的约 3.1 万
+个文件，trunk 为 0、旧锚点标签）移至 `~/.katarank/kab2_cache_v1_zerotrunk`。
 
 ---
 
@@ -310,14 +346,16 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 
 ### 已完成
 - [x] Phase 1: 策略改进训练 (StratifiedRankSampler, dropout, warmup)
-- [x] Phase 2: 全量 Teacher 训练 (27.2k 游戏, val_loss 0.7727)
-- [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%)
+- [x] Phase 2: 全量 Teacher 训练 (27.2k 游戏, val_loss 0.7727) — 指标作废，见 2.4
+- [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%) — 指标作废，见 2.4
+- [x] Lite 模型部署 — engine_mode=lite 为线上默认推理模式
 
 ### 下一步
+- **全量重训（进行中，2026-10-14 起）** — 新 KAB2（真实 trunk + 锚点 v2）上从头训练 Full，再蒸馏 Lite；见 2.4
+- **trunk A/B** — 同一份数据上对比真实 trunk 与清零 trunk，确认 Full 相对 Lite 的价值
 - **数据扩充** — 数据量收益未饱和，更多游戏预期继续改善
 - **模型容量探索** — hidden_dim 128→256, depth+1
 - **超参调优** — loss 权重、label smoothing、gradient accumulation
-- **Lite 模型部署** — engine_mode=lite 快速推理模式
 
 ---
 
