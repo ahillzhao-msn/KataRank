@@ -249,7 +249,7 @@ class StratifiedRankSampler(Sampler):
                 take = per_band if band_idx < self.n_bands else (self.batch_size - len(batch))
                 for _ in range(take):
                     if ptr >= len(bucket):
-                        self._rng.shuffle(np.asarray(bucket))
+                        self._rng.shuffle(bucket)  # in place; np.asarray(list) would shuffle a copy
                         ptr = 0
                     batch.append(bucket[ptr])
                     ptr += 1
@@ -263,7 +263,7 @@ class StratifiedRankSampler(Sampler):
             if len(batch) < self.batch_size and self.drop_last:
                 break
 
-            self._rng.shuffle(np.asarray(batch))
+            self._rng.shuffle(batch)
             yield from batch
             total_yielded += len(batch)
 
