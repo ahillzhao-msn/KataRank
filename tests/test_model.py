@@ -13,6 +13,7 @@ import os
 import struct
 import tempfile
 import unittest
+from unittest import mock
 import zlib
 
 import numpy as np
@@ -206,7 +207,10 @@ class TestCombinedFormat(unittest.TestCase):
 class TestStreamProtocol(unittest.TestCase):
 
     def _engine(self) -> KataGoEngine:
-        return KataGoEngine(model='dummy.bin.gz', katago_bin='dummy')
+        # _read_stream needs no binary; skip discovery, which verifies the path is a real
+        # fork build (CI has none — locally it silently fell back to an installed one).
+        with mock.patch('katarank.katago_setup.discover_katago', return_value='dummy'):
+            return KataGoEngine(model='dummy.bin.gz', katago_bin='dummy')
 
     def test_read_stream_frames(self):
         buf1, _ = make_kab2_bytes(num_moves=6, seed=8)
