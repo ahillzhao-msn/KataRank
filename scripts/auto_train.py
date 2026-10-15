@@ -588,6 +588,8 @@ def main():
     parser.add_argument("--cache-dir", type=Path, default=KAB2_CACHE,
                         help=f"KAB2 cache directory (default {KAB2_CACHE})")
     args = parser.parse_args()
+    if args.fresh and args.resume:
+        parser.error("--fresh and --resume are mutually exclusive")
 
     state = _load_state()
     katago_cfg = _load_katago_config()
@@ -687,8 +689,6 @@ def main():
         # ── Step 5: Train ───────────────────────────────────────────────────
         log.info("=== Step 5/5: Training KataRank model ===")
         resume = args.resume
-        if args.fresh and resume:
-            parser.error("--fresh and --resume are mutually exclusive")
         if not resume and not args.fresh:
             candidate = PROJECT_ROOT / "nets" / "katarank" / "best.pt"
             if candidate.exists():
