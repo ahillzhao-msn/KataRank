@@ -168,8 +168,10 @@ def create_app(
         persistent:      Keep one katago daemon loaded for the server's
                          lifetime (sub-second request latency). False spawns
                          a fresh process per request (model reload each time).
-        engine_mode:     Daemon analysis mode, 'lite' or 'full'. Requests
-                         asking for the other mode fall back to one-shot.
+        engine_mode:     Daemon analysis mode, 'lite' or 'full'. Must match the
+                         mode clients request (GOPredict asks for the mode of its
+                         active model): requests for the other mode fall back to a
+                         one-shot process that reloads the model every time.
         inference_humansl: Also run the HumanSL pass in the batch engine. Off by
                          default: HumanSL rank is the training anchor (KAB2 for
                          training is generated offline with it); inference uses
@@ -735,7 +737,7 @@ _CONFIG_TEMPLATE = """\
 # inference_humansl = false       # also run HumanSL in the batch engine (training anchor only)
 # host = "127.0.0.1"
 # port = 8765
-# engine_mode = "lite"            # lite | full — default mode for requests
+# engine_mode = "lite"            # lite | full — must match the mode clients request
 # max_concurrency = 1
 # sgf_root = ""                   # restrict file endpoints to this directory
 # device = ""                     # cpu | cuda (auto-detected)
