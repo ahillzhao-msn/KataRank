@@ -6,10 +6,12 @@ Usage:
     uv run katarank-train --config src/katarank/train/config_kata_native.yaml --resume nets/best.pt
 """
 
+import json
 import os
 import time
 import argparse
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -20,6 +22,35 @@ from katarank.model import KataRankModel, KataRankLoss
 from katarank.data.datasets import make_kab2_loader
 from katarank.schema import TrainingReport, save_training_report
 
+# Same path server.py's /train/status and train_session.py's JOB_FILE read/
+# write — this process runs as a separate `-m katarank.train.training`
+# subprocess (spawned by train_session.py), so it has no access to
+# train_session.py's in-memory job state and merges into the file directly.
+JOB_FILE = Path.home() / ".katarank" / "train_job.json"
+
+
+HISTORY_LEN = 40  # enough points to see the convergence curve without the file growing unbounded
+
+
+def _write_epoch_progress(progress: dict) -> None:
+    """Merge current epoch + a rolling loss-curve history into the shared
+    training job file, so /train/status can show live progress and the
+    convergence trend (not just the latest point) without polling logs."""
+    try:
+        job = json.loads(JOB_FILE.read_text(encoding='utf-8')) if JOB_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        job = {}
+    job['epoch_progress'] = progress
+    history = job.get('epoch_history') or []
+    history.append({'epoch': progress['epoch'], 'train_loss': round(progress['train_loss'], 4),
+                     'val_loss': round(progress['val_loss'], 4)})
+    job['epoch_history'] = history[-HISTORY_LEN:]
+    try:
+        JOB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        JOB_FILE.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding='utf-8')
+    except OSError:
+        pass
+
 
 def _device(cfg_val: str) -> torch.device:
     if cfg_val == 'auto':
@@ -28,7 +59,8 @@ def _device(cfg_val: str) -> torch.device:
 
 
 class Trainer:
-    def __init__(self, model, loss_fn, train_loader, val_loader, config):
+    def __init__(self, model, loss_fn, train_loader, val_loader, config,
+                resume_optimizer_path: str | None = None):
         self.model = model
         self.loss_fn = loss_fn
         self.train_loader = train_loader
@@ -77,6 +109,34 @@ class Trainer:
         self.train_hist: list = []
         self.val_hist: list = []
 
+        # Continual/incremental training: --resume only restores model
+        # WEIGHTS by itself (see main()) — a fresh AdamW starts with zero
+        # moment estimates, and Adam's bias-correction term amplifies the
+        # very first steps when those estimates are still zero, so even a
+        # warmed-up LR schedule can knock an already-converged model off
+        # its optimum before it settles back down (confirmed: a real run
+        # degraded for ~30 epochs after resuming and never recovered).
+        # Restoring the optimizer + scheduler state alongside the model
+        # weights makes this a true continuation of the SAME optimization
+        # trajectory instead of a fresh cold start on pre-trained weights.
+        # Training from scratch (no resume_optimizer_path) is completely
+        # unaffected — self.optimizer/self.scheduler are freshly built
+        # above either way.
+        if resume_optimizer_path and os.path.exists(resume_optimizer_path):
+            state = torch.load(resume_optimizer_path, map_location=self.device,
+                               weights_only=True)
+            self.optimizer.load_state_dict(state['optimizer_state'])
+            self.scheduler.load_state_dict(state['scheduler_state'])
+            print(f"Resumed optimizer/scheduler state from {resume_optimizer_path} "
+                  f"(was at epoch {state.get('epoch', '?')})")
+
+    def save_optimizer_state(self, path: str, epoch: int):
+        torch.save({
+            'optimizer_state': self.optimizer.state_dict(),
+            'scheduler_state': self.scheduler.state_dict(),
+            'epoch': epoch,
+        }, path)
+
     def _batch_loss(self, batch) -> torch.Tensor:
         x     = batch['x'].to(self.device)
         xlens = batch['xlens']
@@ -115,7 +175,7 @@ class Trainer:
             n += 1
         return {'val_loss': total / max(n, 1)}
 
-    def train(self, epochs: int, ckpt_dir: str) -> dict:
+    def train(self, epochs: int, ckpt_dir: str, on_epoch=None) -> dict:
         os.makedirs(ckpt_dir, exist_ok=True)
         print(f"Training on {self.device}  |  train={len(self.train_loader.dataset)}  "
               f"val={len(self.val_loader.dataset)}")
@@ -133,7 +193,8 @@ class Trainer:
             self.val_hist.append(round(val['val_loss'], 6))
 
             print(f"Epoch {epoch:3d}/{epochs}  train={train_loss:.4f}  "
-                  f"val={val['val_loss']:.4f}  lr={lr:.2e}  ({dt:.1f}s)")
+                  f"val={val['val_loss']:.4f}  lr={lr:.2e}  ({dt:.1f}s)",
+                  flush=True)
 
             self.scheduler.step()
 
@@ -143,12 +204,19 @@ class Trainer:
                 self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
                 self.bad_epochs = 0
                 self.model.save(os.path.join(ckpt_dir, 'best.pt'))
+                self.save_optimizer_state(os.path.join(ckpt_dir, 'optimizer_state.pt'), epoch)
             else:
                 self.bad_epochs += 1
-                if self.bad_epochs >= self.patience:
-                    print(f"Early stopping at epoch {epoch}")
-                    self.early_stopped = True
-                    break
+
+            if on_epoch is not None:
+                on_epoch(epoch=epoch, epochs=epochs, train_loss=train_loss,
+                          val_loss=val['val_loss'], lr=lr,
+                          best_val_loss=self.best_val_loss, best_epoch=self.best_epoch)
+
+            if self.bad_epochs >= self.patience:
+                print(f"Early stopping at epoch {epoch}")
+                self.early_stopped = True
+                break
 
         if self.best_state:
             self.model.load_state_dict(self.best_state)
@@ -159,8 +227,17 @@ class Trainer:
 # ─── Validation metrics (for TrainingReport) ─────────────────────────────────
 
 @torch.no_grad()
-def evaluate_metrics(model, loader, device) -> dict:
-    """Rank/rating quality on a validation loader. See TrainingReport docs."""
+def evaluate_metrics(model, loader, device, input_dim: int | None = None) -> dict:
+    """Rank/rating quality on a validation loader. See TrainingReport docs.
+
+    input_dim: slice batch['x']'s feature dim down to this width before
+    feeding the model — for evaluating a lite (10-dim) checkpoint against
+    a loader built from full (1034-dim) KAB2 data, same convention as
+    distill.py's own end-of-run evaluation (SlicedDataset). batch['x'] is
+    a flat (total_moves_in_batch, feat_dim) tensor — kab2_collate
+    torch.cat's per-game sequences along dim 0 rather than padding to
+    (B, T, D) — so this is a 2D slice on the last axis, not 3D.
+    """
     model.eval()
     ratings_pred, ratings_tgt = [], []
     rank_pred, rank_lab = [], []
@@ -168,7 +245,8 @@ def evaluate_metrics(model, loader, device) -> dict:
     for batch in loader:
         if not batch['xlens']:
             continue
-        out = model(batch['x'].to(device), batch['xlens'])
+        x = batch['x'][:, :input_dim] if input_dim else batch['x']
+        out = model(x.to(device), batch['xlens'])
         for side, key in (('b', 'rank_b'), ('w', 'rank_w')):
             pred = out[f'rank_probs_{side}'].argmax(-1).cpu()
             lab  = batch[key]
@@ -196,9 +274,13 @@ def main():
     parser.add_argument('--data-dir', help='Override data directory')
     parser.add_argument('--meta', help='Override _meta.csv path')
     parser.add_argument('--epochs', type=int)
+    parser.add_argument('--patience', type=int)
     parser.add_argument('--lr', type=float)
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--resume', help='Resume from checkpoint .pt')
+    parser.add_argument('--ckpt-dir', help='Override output.checkpoint_dir '
+                        '(e.g. a staging dir, so this run does not overwrite '
+                        'the live production checkpoint before it is evaluated)')
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -211,6 +293,7 @@ def main():
     if args.data_dir: tc['data_dir']  = args.data_dir
     if args.meta:     tc['meta_csv']  = args.meta
     if args.epochs:   tc['epochs']    = args.epochs
+    if args.patience: tc['patience']  = args.patience
     if args.lr:       tc['learning_rate'] = args.lr
     if args.batch_size: tc['batch_size'] = args.batch_size
 
@@ -275,10 +358,21 @@ def main():
         w_rank   = lw.get('rank_anchor', 0.3),
     )
 
+    resume_optimizer_path = None
     if args.resume:
         ckpt = KataRankModel.load(args.resume)
         model.load_state_dict(ckpt.state_dict())
         print(f"Resumed from {args.resume}")
+        # Companion file saved next to any checkpoint by Trainer.
+        # save_optimizer_state — carries this same continuation forward
+        # whether --resume points at last run's own candidate or all the
+        # way back at the live production checkpoint.
+        candidate = os.path.join(os.path.dirname(args.resume), 'optimizer_state.pt')
+        if os.path.exists(candidate):
+            resume_optimizer_path = candidate
+        else:
+            print(f"No optimizer_state.pt next to {args.resume} — "
+                  f"continuing with a fresh optimizer/scheduler (weights only)")
 
     trainer = Trainer(
         model        = model,
@@ -286,15 +380,20 @@ def main():
         train_loader = train_loader,
         val_loader   = val_loader,
         config       = tc,
+        resume_optimizer_path = resume_optimizer_path,
     )
 
-    ckpt_dir = oc.get('checkpoint_dir', 'nets/katarank')
+    ckpt_dir = args.ckpt_dir or oc.get('checkpoint_dir', 'nets/katarank')
     t_start = time.time()
+
+    def on_epoch(**progress):
+        _write_epoch_progress(progress)
 
     print("\nStarting training...")
     result = trainer.train(
         epochs   = tc.get('epochs', 100),
         ckpt_dir = ckpt_dir,
+        on_epoch = on_epoch,
     )
 
     model.save(os.path.join(ckpt_dir, 'final.pt'))

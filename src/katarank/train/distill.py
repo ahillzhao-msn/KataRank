@@ -16,10 +16,12 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import argparse
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
 import torch
@@ -27,6 +29,29 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+
+# Separate from ~/.katarank/train_job.json (full-model training) — distillation
+# and full training can be triggered independently, and each needs its own
+# phase/progress state rather than one clobbering the other's job file.
+DISTILL_JOB_FILE = Path.home() / ".katarank" / "distill_job.json"
+HISTORY_LEN = 40
+
+
+def _write_epoch_progress(progress: dict) -> None:
+    try:
+        job = json.loads(DISTILL_JOB_FILE.read_text(encoding='utf-8')) if DISTILL_JOB_FILE.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        job = {}
+    job['epoch_progress'] = progress
+    history = job.get('epoch_history') or []
+    history.append({'epoch': progress['epoch'], 'train_loss': round(progress['train_loss'], 4),
+                     'val_loss': round(progress['val_loss'], 4)})
+    job['epoch_history'] = history[-HISTORY_LEN:]
+    try:
+        DISTILL_JOB_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DISTILL_JOB_FILE.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding='utf-8')
+    except OSError:
+        pass
 
 from katarank.model import KataRankModel
 from katarank.data.datasets.dataset_kab2 import (
@@ -245,7 +270,8 @@ def distill_collate(batch):
 
 class DistillTrainer:
 
-    def __init__(self, student, loss_fn, train_loader, val_loader, config):
+    def __init__(self, student, loss_fn, train_loader, val_loader, config,
+                resume_optimizer_path: str | None = None):
         self.student = student
         self.loss_fn = loss_fn
         self.train_loader = train_loader
@@ -296,6 +322,26 @@ class DistillTrainer:
         self.train_hist: list = []
         self.val_hist: list = []
 
+        # Same rationale as katarank.train.training.Trainer: resuming model
+        # weights alone against a fresh AdamW (zeroed moment estimates) lets
+        # the bias-correction term knock an already-converged student off
+        # its optimum in the first few steps. Carrying the optimizer +
+        # scheduler state forward makes a --resume run a true continuation.
+        if resume_optimizer_path and os.path.exists(resume_optimizer_path):
+            state = torch.load(resume_optimizer_path, map_location=self.device,
+                               weights_only=True)
+            self.optimizer.load_state_dict(state['optimizer_state'])
+            self.scheduler.load_state_dict(state['scheduler_state'])
+            print(f"Resumed optimizer/scheduler state from {resume_optimizer_path} "
+                  f"(was at epoch {state.get('epoch', '?')})")
+
+    def save_optimizer_state(self, path: str, epoch: int):
+        torch.save({
+            'optimizer_state': self.optimizer.state_dict(),
+            'scheduler_state': self.scheduler.state_dict(),
+            'epoch': epoch,
+        }, path)
+
     def _batch_loss(self, batch) -> torch.Tensor:
         x = batch['x'].to(self.device)
         xlens = batch['xlens']
@@ -344,7 +390,7 @@ class DistillTrainer:
             n += 1
         return total / max(n, 1)
 
-    def train(self, epochs: int, ckpt_dir: str) -> dict:
+    def train(self, epochs: int, ckpt_dir: str, on_epoch=None) -> dict:
         os.makedirs(ckpt_dir, exist_ok=True)
         print(f"Distillation on {self.device}  |  "
               f"train={len(self.train_loader.dataset)}  "
@@ -374,12 +420,19 @@ class DistillTrainer:
                                    for k, v in self.student.state_dict().items()}
                 self.bad_epochs = 0
                 self.student.save(os.path.join(ckpt_dir, 'best_lite.pt'))
+                self.save_optimizer_state(os.path.join(ckpt_dir, 'optimizer_state.pt'), epoch)
             else:
                 self.bad_epochs += 1
-                if self.bad_epochs >= self.patience:
-                    print(f"Early stopping at epoch {epoch}")
-                    self.early_stopped = True
-                    break
+
+            if on_epoch is not None:
+                on_epoch(epoch=epoch, epochs=epochs, train_loss=train_loss,
+                          val_loss=val_loss, lr=lr,
+                          best_val_loss=self.best_val_loss, best_epoch=self.best_epoch)
+
+            if self.bad_epochs >= self.patience:
+                print(f"Early stopping at epoch {epoch}")
+                self.early_stopped = True
+                break
 
         if self.best_state:
             self.student.load_state_dict(self.best_state)
@@ -402,6 +455,13 @@ def main():
     parser.add_argument('--hidden-dim', type=int, default=64,
                         help='Student model hidden dim (smaller than teacher)')
     parser.add_argument('--device', default='auto')
+    parser.add_argument('--resume', help='Path to a previous best_lite.pt to warm-start '
+                        'weights + optimizer/scheduler state from (looks for a companion '
+                        'optimizer_state.pt next to it, same convention as training.py)')
+    parser.add_argument('--patience', type=int, default=30)
+    parser.add_argument('--ckpt-dir', default='nets/katarank_lite',
+                        help='Output dir — override to a staging dir so this run does not '
+                        'overwrite the live lite checkpoint before it is evaluated')
     args = parser.parse_args()
 
     print("=" * 60)
@@ -446,17 +506,30 @@ def main():
                             shuffle=False, collate_fn=distill_collate)
 
     # ── Build student model ──────────────────────────────────────────────
-    print(f"\nBuilding student model (input_dim={student_dim}, "
-          f"hidden_dim={args.hidden_dim})...")
-    student = KataRankModel(
-        input_dim=student_dim,
-        hidden_dim=args.hidden_dim,
-        num_heads=4,
-        num_inducing=16,
-        encoder_depth=2,
-        cross_depth=1,
-        dropout=0.2,
-    )
+    resume_optimizer_path = None
+    if args.resume:
+        student = KataRankModel.load(args.resume)
+        print(f"\nResumed student from {args.resume} "
+              f"(input_dim={student.get_config()['input_dim']}, "
+              f"hidden_dim={student.get_config()['hidden_dim']})")
+        candidate = os.path.join(os.path.dirname(args.resume), 'optimizer_state.pt')
+        if os.path.exists(candidate):
+            resume_optimizer_path = candidate
+        else:
+            print(f"No optimizer_state.pt next to {args.resume} — "
+                  f"continuing with a fresh optimizer/scheduler (weights only)")
+    else:
+        print(f"\nBuilding student model (input_dim={student_dim}, "
+              f"hidden_dim={args.hidden_dim})...")
+        student = KataRankModel(
+            input_dim=student_dim,
+            hidden_dim=args.hidden_dim,
+            num_heads=4,
+            num_inducing=16,
+            encoder_depth=2,
+            cross_depth=1,
+            dropout=0.2,
+        )
     print(f"  Student params: {student.count_parameters():,}")
     print(f"  Teacher params: {teacher.count_parameters():,}")
     print(f"  Compression: {teacher.count_parameters() / student.count_parameters():.1f}x")
@@ -475,17 +548,21 @@ def main():
         'warmup_epochs': 5,
         'weight_decay': 1e-4,
         'gradient_clip': 1.0,
-        'patience': 30,
+        'patience': args.patience,
         'epochs': args.epochs,
         'device': args.device,
     }
 
-    ckpt_dir = 'nets/katarank_lite'
-    trainer = DistillTrainer(student, loss_fn, train_loader, val_loader, config)
+    ckpt_dir = args.ckpt_dir
+    trainer = DistillTrainer(student, loss_fn, train_loader, val_loader, config,
+                             resume_optimizer_path=resume_optimizer_path)
+
+    def on_epoch(**progress):
+        _write_epoch_progress(progress)
 
     print("\nStarting distillation...")
     t_start = time.time()
-    result = trainer.train(args.epochs, ckpt_dir)
+    result = trainer.train(args.epochs, ckpt_dir, on_epoch=on_epoch)
 
     student.save(os.path.join(ckpt_dir, 'final_lite.pt'))
 

@@ -4,13 +4,12 @@ Does NOT train. Use auto_train.py for the full pipeline.
 
 Usage:
     uv run python scripts/generate_kab2_incremental.py
-    uv run python scripts/generate_kab2_incremental.py --visits 1 --workers 2
+    uv run python scripts/generate_kab2_incremental.py --visits 1
     uv run python scripts/generate_kab2_incremental.py --upgrade-lite --visits 1
 """
 
 from __future__ import annotations
 import argparse, logging, shutil, tempfile
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 log = logging.getLogger("kab2_gen")
@@ -57,8 +56,6 @@ def main():
                         help="SGFs per chunk (default 500)")
     parser.add_argument("--visits", type=int, default=1,
                         help="Visits per move (1 = feature extraction only, default 1)")
-    parser.add_argument("--workers", type=int, default=1,
-                        help="Parallel katago processes (default 1; 2 if GPU memory allows)")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--upgrade-lite", action="store_true",
                         help="Move lite-only .npz to _lite/ first, regenerate as full")
@@ -88,8 +85,8 @@ def main():
     finally:
         conn.close()
 
-    log.info("Cached: %d | Analyzed: %d | New: %d | visits=%d workers=%d",
-             len(cached_ids), len(all_ids), len(new_ids), args.visits, args.workers)
+    log.info("Cached: %d | Analyzed: %d | New: %d | visits=%d",
+             len(cached_ids), len(all_ids), len(new_ids), args.visits)
 
     if not new_ids:
         log.info("Nothing to generate.")
@@ -105,31 +102,13 @@ def main():
 
     total_generated = 0
 
-    if args.workers <= 1:
-        for ci, chunk in enumerate(chunks):
-            label = f"Chunk {ci+1}/{len(chunks)}"
-            log.info("=== %s: %d games ===", label, len(chunk))
-            n = _run_chunk(chunk, args.db_dsn, str(cache_dir),
-                           katago_cfg, args.visits, label)
-            total_generated += n
-            log.info("%s done: +%d (total: %d)", label, n, total_generated)
-    else:
-        log.info("Starting %d parallel workers", args.workers)
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {}
-            for ci, chunk in enumerate(chunks):
-                label = f"Chunk {ci+1}/{len(chunks)}"
-                f = pool.submit(_run_chunk, chunk, args.db_dsn, str(cache_dir),
-                                katago_cfg, args.visits, label)
-                futures[f] = label
-            for f in as_completed(futures):
-                label = futures[f]
-                try:
-                    n = f.result()
-                    total_generated += n
-                    log.info("%s done: +%d (total: %d)", label, n, total_generated)
-                except Exception as e:
-                    log.error("%s failed: %s", label, e)
+    for ci, chunk in enumerate(chunks):
+        label = f"Chunk {ci+1}/{len(chunks)}"
+        log.info("=== %s: %d games ===", label, len(chunk))
+        n = _run_chunk(chunk, args.db_dsn, str(cache_dir),
+                       katago_cfg, args.visits, label)
+        total_generated += n
+        log.info("%s done: +%d (total: %d)", label, n, total_generated)
 
     log.info("=== All done: generated %d new KAB2 files ===", total_generated)
 
