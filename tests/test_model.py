@@ -20,14 +20,14 @@ import torch
 
 from katarank.engine import KataGoEngine, build_kab2_payload, parse_kab2_buffer
 from katarank.schema import (
-    KAB2Sample, kab2_make_sample, kab2_collate, rank_idx_to_str, RANK_NAMES,
+    kab2_make_sample, kab2_collate, rank_idx_to_str, RANK_NAMES,
 )
 from katarank.data.preprocess import (
     read_kab2, read_kab2_combined, probe_kab2_dim,
 )
 from katarank.model import (
     KataRankModel, OrdinalLogisticHead, KataRankLoss,
-    DualViewSetTransformer, SetTransformer, pack_batch, unbatch,
+    DualViewSetTransformer, SetTransformer, pack_batch,
 )
 
 
@@ -326,7 +326,8 @@ class TestOrdinalHead(unittest.TestCase):
         self.assertTrue((probs >= 0).all())
 
     def test_thresholds_monotonic_after_update(self):
-        head = OrdinalLogisticHead(16)
+        torch.manual_seed(0)  # unseeded randn*5 sometimes drove a delta so negative that
+        head = OrdinalLogisticHead(16)  # softplus(~1e-9) vanished in float32 (flaky)
         # Perturb parameters as a training step would
         with torch.no_grad():
             head.thresh_deltas.add_(torch.randn_like(head.thresh_deltas) * 5)
