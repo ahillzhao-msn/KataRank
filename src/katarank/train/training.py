@@ -17,7 +17,7 @@ import torch
 import torch.optim as optim
 
 from katarank.model import KataRankModel, KataRankLoss
-from katarank.data.datasets import KAB2Dataset, make_kab2_loader
+from katarank.data.datasets import make_kab2_loader
 from katarank.schema import TrainingReport, save_training_report
 
 

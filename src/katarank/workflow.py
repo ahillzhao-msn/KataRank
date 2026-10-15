@@ -20,10 +20,9 @@ Usage::
 """
 
 import logging
-import struct
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, TypedDict, Union
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, Iterator, List, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -31,9 +30,12 @@ import torch.nn as nn
 import torch.optim as optim
 
 from katarank.schema import (
-    KAB2Output, KAB2Sample, MoveRecord, ReviewOutput,
+    KAB2Output, MoveRecord, ReviewOutput,
     kab2_make_sample, kab2_collate,
 )
+
+if TYPE_CHECKING:
+    from katarank.engine import KataGoEngine
 
 _log = logging.getLogger(__name__)
 
@@ -576,7 +578,6 @@ def run_review_strings(
 
 
 def _attach_metadata_from_files(outputs: List[KAB2Output], paths: List[str]):
-    from pathlib import Path
     from katarank.sgf_meta import read_sgf_metadata
     by_stem = {Path(p).stem: p for p in paths}
     for o in outputs:

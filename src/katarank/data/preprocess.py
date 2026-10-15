@@ -18,8 +18,12 @@ Offset  Size  Field
 
 PlayerSummary notable indices
     [2]  meanLogPrior      — primary training target
-    [10] humanRankIdx      — 0..28 (20k..9d), -1 if not computed
-    [11] humanLogPrior     — HumanSL confidence weight
+    [10] humanRankIdx      — HumanSL anchor, rounded 0..28 (20k..9d), -1 if not computed
+    [11] humanLogPrior     — mean HumanSL log-likelihood at the best evaluated profile
+    [12] humanRankExp      — anchor v2: continuous posterior-mean rank (0..28)
+    [13] humanRankSd       — anchor v2: posterior sd (ranks)
+    [14] humanProfiles     — anchor v2: number of HumanSL profiles evaluated
+    [15] humanAnchorVer    — anchor method version (2 = loss-gated 5-profile; 0 = legacy window)
 
 Scalar layout per move (10 fields)
     [0] whiteWinProb
@@ -30,8 +34,11 @@ Scalar layout per move (10 fields)
     [5] policyPrior
     [6] policyRank/361
     [7] isWhite  (0=Black, 1=White)
-    [8] winDelta (deferred — 0.0 in file)
-    [9] scoreDelta/50 (deferred — 0.0 in file)
+    [8] winDelta       (whiteWinProb[t+1] - whiteWinProb[t]; 0 for the last move)
+    [9] scoreDelta/50  (whiteScoreMean[t+1] - whiteScoreMean[t]; 0 for the last move)
+
+This module is the single KAB2 codec (parse + build); katarank.engine re-exports
+parse_kab2_buffer / build_kab2_payload from here.
 """
 
 import struct
@@ -43,11 +50,16 @@ import numpy as np
 
 _MAGIC = b'KAB2'
 _HEADER_SIZE = 96
+_SUMMARY_OFFSET = 32
 
 # PlayerSummary field indices
 KAB2_SUM_MEAN_LP     = 2
 KAB2_SUM_HUMAN_RANK  = 10
 KAB2_SUM_HUMAN_LP    = 11
+KAB2_SUM_HUMAN_EXP   = 12
+KAB2_SUM_HUMAN_SD    = 13
+KAB2_SUM_HUMAN_NPROF = 14
+KAB2_SUM_HUMAN_VER   = 15
 
 # Scalar field indices
 KAB2_SCALAR_WIN_PROB   = 0
@@ -87,7 +99,7 @@ def read_kab2(path: str) -> Tuple[np.ndarray, Dict]:
             return w_moves, w_info
         raise ValueError(f"Combined KAB2 file has no player data: {path}")
     # Old single format
-    return _parse_kab2(raw)
+    return parse_kab2_buffer(raw)
 
 
 def probe_kab2_dim(path: str) -> int:
@@ -111,7 +123,8 @@ def probe_kab2_dim(path: str) -> int:
     return scalar_dim + 2 * trunk_dim
 
 
-def _parse_kab2(raw: bytes) -> Tuple[np.ndarray, Dict]:
+def parse_kab2_buffer(raw: bytes) -> Tuple[np.ndarray, Dict]:
+    """Parse one KAB2 payload (bytes → (moves, info)). ``moves`` is a writable copy."""
     if raw[:4] != _MAGIC:
         raise ValueError(f"Not a KAB2 buffer (magic={raw[:4]!r})")
 
@@ -119,7 +132,7 @@ def _parse_kab2(raw: bytes) -> Tuple[np.ndarray, Dict]:
     scalar_dim = struct.unpack_from('<i', raw, 8)[0]
     trunk_dim  = struct.unpack_from('<i', raw, 12)[0]
     flags      = struct.unpack_from('<i', raw, 28)[0]
-    summary    = struct.unpack_from('<16f', raw, 32)
+    summary    = struct.unpack_from('<16f', raw, _SUMMARY_OFFSET)
 
     payload = raw[_HEADER_SIZE:]
     if flags & 1:
@@ -127,23 +140,52 @@ def _parse_kab2(raw: bytes) -> Tuple[np.ndarray, Dict]:
         payload = zlib.decompress(payload[4: 4 + clen])
 
     move_dim = scalar_dim + 2 * trunk_dim
-    moves = np.frombuffer(payload, dtype=np.float32).reshape(num_moves, move_dim)
-    moves = np.ascontiguousarray(moves)
+    moves = np.frombuffer(payload, dtype=np.float32).reshape(num_moves, move_dim).copy()
 
+    # humanRankIdx is written as a rounded integer; int() of a float >= 0 is exact here.
     human_rank = int(summary[KAB2_SUM_HUMAN_RANK]) if summary[KAB2_SUM_HUMAN_RANK] >= 0 else -1
+    anchor_ver = int(summary[KAB2_SUM_HUMAN_VER])
 
     info = {
-        'num_moves':       num_moves,
-        'scalar_dim':      scalar_dim,
-        'trunk_dim':       trunk_dim,
-        'input_dim':       move_dim,
-        'compressed':      bool(flags & 1),
-        'summary':         summary,
-        'mean_log_prior':  float(summary[KAB2_SUM_MEAN_LP]),
-        'human_rank_idx':  human_rank,
-        'human_log_prior': float(summary[KAB2_SUM_HUMAN_LP]),
+        'num_moves':        num_moves,
+        'scalar_dim':       scalar_dim,
+        'trunk_dim':        trunk_dim,
+        'input_dim':        move_dim,
+        'compressed':       bool(flags & 1),
+        'summary':          summary,
+        'mean_log_prior':   float(summary[KAB2_SUM_MEAN_LP]),
+        'human_rank_idx':   human_rank,
+        'human_log_prior':  float(summary[KAB2_SUM_HUMAN_LP]),
+        'human_anchor_ver': anchor_ver,
+        # Anchor v2 fields; None for files written by the legacy 3-profile window.
+        'human_rank_exp':   float(summary[KAB2_SUM_HUMAN_EXP]) if anchor_ver >= 2 else None,
+        'human_rank_sd':    float(summary[KAB2_SUM_HUMAN_SD]) if anchor_ver >= 2 else None,
     }
     return moves, info
+
+
+def build_kab2_payload(moves: np.ndarray, info: dict) -> bytes:
+    """Inverse of parse_kab2_buffer(): uncompressed KAB2 payload from (moves, info)."""
+    num_moves = moves.shape[0]
+    input_dim = moves.shape[1] if num_moves > 0 else info.get('input_dim', 10)
+    scalar_dim = info.get('scalar_dim', min(input_dim, 10))
+    trunk_dim = info.get('trunk_dim', (input_dim - scalar_dim) // 2)
+
+    summary = list(info.get('summary', [0.0] * 16))
+    if len(summary) < 16:
+        summary.extend([0.0] * (16 - len(summary)))
+    summary[KAB2_SUM_MEAN_LP] = info.get('mean_log_prior', summary[KAB2_SUM_MEAN_LP])
+    summary[KAB2_SUM_HUMAN_RANK] = float(info.get('human_rank_idx', -1))
+    summary[KAB2_SUM_HUMAN_LP] = info.get('human_log_prior', summary[KAB2_SUM_HUMAN_LP])
+
+    header = struct.pack(
+        '<4s7i', _MAGIC, num_moves, scalar_dim, trunk_dim,
+        trunk_dim, 19, 19, 0,  # flags=0 (uncompressed)
+    )
+    header += struct.pack('<16f', *summary[:16])
+
+    payload = moves.astype(np.float32).tobytes() if num_moves > 0 else b''
+    return header + payload
 
 
 # ─── Combined KAB2 pair reader ───────────────────────────────────────────────
@@ -179,8 +221,8 @@ def _parse_combined(
     b_info  = w_info  = None
 
     if b_sz > 0:
-        b_moves, b_info = _parse_kab2(data[4: 4 + b_sz])
+        b_moves, b_info = parse_kab2_buffer(data[4: 4 + b_sz])
     if w_sz > 0:
-        w_moves, w_info = _parse_kab2(data[8 + b_sz: 8 + b_sz + w_sz])
+        w_moves, w_info = parse_kab2_buffer(data[8 + b_sz: 8 + b_sz + w_sz])
 
     return b_moves, w_moves, b_info or {}, w_info or {}

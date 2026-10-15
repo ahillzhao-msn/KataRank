@@ -20,9 +20,8 @@ import os
 import time
 import argparse
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,9 +29,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
 from katarank.model import KataRankModel
-from katarank.data.preprocess import read_kab2_combined
 from katarank.data.datasets.dataset_kab2 import (
-    KAB2Dataset, StratifiedRankSampler, rank_str_to_idx, NUM_RANK_CLASSES,
+    KAB2Dataset, StratifiedRankSampler,
 )
 from katarank.schema import kab2_collate, save_training_report, TrainingReport
 

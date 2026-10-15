@@ -36,21 +36,30 @@ On first run a config template is written to `~/.katarank/server.toml`. Edit it 
 # model auto-discovered from ~/.katago/models/ — or set explicitly:
 # model = "C:/path/to/kata1-b18c384nbt.bin.gz"
 
+# katago_bin = "C:/path/to/katago.exe"   # the custom fork (batch_analysis); see below
 host = "127.0.0.1"
 port = 8765
 engine_mode = "lite"
 ```
 
-KataGo binary is auto-discovered from:
-1. `src/katarank/bin/katago.exe` (bundled)
-2. `~/katago-fork/cpp/katago.exe` (local build)
-3. `KATAGO_BIN` env var or PATH
+`katarank-server --init-config` rewrites the commented template listing every key.
+
+KataGo binary: `katago_bin` in `server.toml` (or `--katago-bin`) wins. Otherwise it is
+auto-discovered (`katago_setup.discover_katago`) in this order, skipping stock builds that
+lack `batch_analysis`:
+1. `$KATAGO_BIN`
+2. `src/katarank/bin/katago.exe` (bundled)
+3. known install dirs (e.g. `~/katago-fork/cpp/`)
+4. `PATH`
 
 ---
 
 ## Run the server
 
 ```powershell
+.\scripts\start-katarank.ps1            # headless; settings from ~/.katarank/server.toml
+.\scripts\start-katarank.ps1 -Restart   # after deploying a new binary or checkpoint
+# or in the foreground:
 uv run katarank-server
 ```
 
@@ -60,8 +69,9 @@ Check it's up:
 curl http://localhost:8765/health
 ```
 
-GoPredict expects the server at `http://localhost:8765` by default
-(set `KATARANK_HOST_URL` in GoPredict's `.env` if you use a different port).
+GoPredict's containers (WSL Docker) reach it through `KATARANK_HOST_URL` in GoPredict's
+`.env` (default `http://winhost:8765`, where `winhost` is the WSL gateway). GoPredict's
+`scripts/refresh-katarank-env.sh` keeps that `.env` entry pointed at the current gateway.
 
 ---
 
@@ -81,7 +91,7 @@ uv run katarank-server --help
 ## Troubleshooting
 
 **`katago binary not found`**
-→ Place `katago.exe` in `src\katarank\bin\`, set `KATAGO_BIN` in `.env`, or build from
+→ Set `katago_bin` in `~/.katarank/server.toml`, place `katago.exe` in `src\katarank\bin\`, or build from
   [ahillzhao-msn/KataGo](https://github.com/ahillzhao-msn/KataGo).
 
 **`No KataGo model found`**
