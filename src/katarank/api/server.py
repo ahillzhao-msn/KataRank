@@ -30,6 +30,7 @@ Review endpoints return ReviewOutput = KAB2Output + 'moves' list
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import List, Optional
@@ -84,8 +85,8 @@ if _FASTAPI_AVAILABLE:
     class OwnershipStringRequest(BaseModel):
         sgf: str
         max_visits: int = 1
-
         last_only: bool = False   # analyze only the final position
+
     class VariationStringRequest(BaseModel):
         sgf: str
         turn: int                                   # 0-based branch point
@@ -346,6 +347,134 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         return {'status': 'restarted'}
+
+    # ── Training (background job) ───────────────────────────────────────────
+    # Training needs the GPU + this Windows host's KataGo fork; it cannot run
+    # inside GoPredict's WSL Docker container, so GoPredict's web UI "train"
+    # button proxies to these two endpoints instead of running anything
+    # itself. See scripts/train_session.py for the gated full-model pipeline
+    # and scripts/distill_session.py for its lite counterpart (evaluation
+    # gate: a candidate is only promoted over the live model if it beats it
+    # on a fresh holdout — see GOPredict docs/TRAINING_FLYWHEEL.md §3).
+    #
+    # Full training and distillation share ONE lock/slot below (not two
+    # independent ones) — they're both GPU-bound subprocesses on the same
+    # card, so letting a train and a distill run start concurrently would
+    # just make both slower (or OOM) rather than actually parallelize.
+    _gpu_lock = threading.Lock()
+    _gpu_job: dict[str, object] = {"proc": None, "kind": None}
+    _train_job_file = Path.home() / ".katarank" / "train_job.json"
+    _distill_job_file = Path.home() / ".katarank" / "distill_job.json"
+    _train_script = Path(__file__).resolve().parents[3] / "scripts" / "train_session.py"
+    _distill_script = Path(__file__).resolve().parents[3] / "scripts" / "distill_session.py"
+
+    def _gpu_job_running(kind: Optional[str] = None) -> bool:
+        """True if a GPU job is alive. Pass kind='train'/'distill' to ask
+        specifically whether THAT kind is the one currently running."""
+        p = _gpu_job["proc"]
+        alive = p is not None and p.poll() is None
+        if kind is not None:
+            return alive and _gpu_job["kind"] == kind
+        return alive
+
+    def _start_gpu_job(kind: str, script: Path, cmd_extra: list[str]):
+        import subprocess
+        import sys as _sys
+        with _gpu_lock:
+            if _gpu_job_running():
+                running_kind = _gpu_job["kind"]
+                raise HTTPException(status_code=409,
+                    detail=f"A {running_kind} session is already running — one GPU, one job at a time")
+            if not script.exists():
+                raise HTTPException(status_code=500, detail=f"Missing {script}")
+            cmd = [_sys.executable, str(script)] + cmd_extra + ["--katarank-url", "http://127.0.0.1:8765"]
+            proc = subprocess.Popen(cmd, cwd=str(script.parents[1]))
+            _gpu_job["proc"] = proc
+            _gpu_job["kind"] = kind
+            logger.info('Started %s session pid=%s: %s', kind, proc.pid, ' '.join(cmd))
+        return proc
+
+    def _read_job_status(job_file: Path, kind: str) -> dict:
+        """Shared by /train/status and /distill/status: read the job file,
+        and reconcile a stale 'running: true' if the process backing THIS
+        kind of job has actually died (crash/OOM/kill never gets to write
+        the normal completion/error exit path's running:false)."""
+        job: dict = {}
+        if job_file.exists():
+            try:
+                job = json.loads(job_file.read_text(encoding='utf-8'))
+            except (json.JSONDecodeError, OSError):
+                job = {}
+        process_alive = _gpu_job_running(kind)
+        if job.get('running') and not process_alive:
+            logger.warning('%s stale: running=true but process is dead — reconciling', job_file.name)
+            job['running'] = False
+            job['phase'] = 'error'
+            job['error'] = f'{kind.capitalize()} process terminated unexpectedly (no final report written)'
+            try:
+                job_file.write_text(json.dumps(job, indent=2), encoding='utf-8')
+            except OSError:
+                logger.exception('Failed to persist reconciled %s', job_file.name)
+        job['process_alive'] = process_alive
+        job.setdefault('phase', 'idle')
+        job.setdefault('running', False)
+        return job
+
+    @app.post('/train/start')
+    def train_start(force: bool = False, threshold: Optional[int] = None,
+                    from_scratch: bool = False):
+        """Kick off scripts/train_session.py in the background. Refuses if
+        a training OR distillation session is already running — one GPU,
+        one job at a time.
+
+        from_scratch=True trains a fresh model instead of continuing from
+        the live checkpoint (see train_session.py --from-scratch) — both
+        modes stay available; default is incremental continuation."""
+        cmd_extra = []
+        if force:
+            cmd_extra.append("--force")
+        if threshold is not None:
+            cmd_extra += ["--threshold", str(threshold)]
+        if from_scratch:
+            cmd_extra.append("--from-scratch")
+        proc = _start_gpu_job("train", _train_script, cmd_extra)
+        return {'status': 'started', 'pid': proc.pid}
+
+    @app.get('/train/status')
+    def train_status():
+        """Current/last training session state. Reads the same JSON file
+        train_session.py writes after every phase — cheap, no IPC needed."""
+        return _read_job_status(_train_job_file, "train")
+
+    @app.post('/distill/start')
+    def distill_start(force: bool = False, threshold: Optional[int] = None,
+                      from_scratch: bool = False, teacher: Optional[str] = None):
+        """Kick off scripts/distill_session.py in the background — lite
+        counterpart of /train/start. Refuses if a training OR distillation
+        session is already running — one GPU, one job at a time.
+
+        Always distills from whatever full model is CURRENTLY live unless
+        teacher= overrides it. from_scratch=True trains a fresh student
+        instead of continuing from the live lite checkpoint."""
+        cmd_extra = []
+        if force:
+            cmd_extra.append("--force")
+        if threshold is not None:
+            cmd_extra += ["--threshold", str(threshold)]
+        if from_scratch:
+            cmd_extra.append("--from-scratch")
+        if teacher:
+            cmd_extra += ["--teacher", teacher]
+        proc = _start_gpu_job("distill", _distill_script, cmd_extra)
+        return {'status': 'started', 'pid': proc.pid}
+
+    @app.get('/distill/status')
+    def distill_status():
+        """Current/last distillation session state — lite counterpart of
+        /train/status. Reads ~/.katarank/distill_job.json (a separate file
+        from train_job.json, so full and lite progress never clobber each
+        other even though they share the same GPU-job slot)."""
+        return _read_job_status(_distill_job_file, "distill")
 
     # Endpoints below are plain `def`: FastAPI runs them in a worker thread,
     # keeping the event loop free while katago runs as a blocking subprocess.
