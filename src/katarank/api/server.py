@@ -32,10 +32,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# A cache file name is a game id; nothing that could walk out of kab2_cache.
+_GAME_ID_RE = re.compile(r"[0-9A-Za-z_-]{1,64}")
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -65,6 +69,10 @@ if _FASTAPI_AVAILABLE:
         min_moves: int = 10
         include_ownership: bool = True
         game_id: Optional[str] = None  # pass real ID to enable KAB2 caching
+
+    class CachedRankRequest(BaseModel):
+        game_ids: List[str]
+        mode: Optional[str] = None
 
     class RankFileRequest(BaseModel):
         path: str
@@ -293,6 +301,17 @@ def create_app(
     def _get_workflow(mode: str) -> Optional[InferenceWorkflow]:
         return _workflows.get(mode) or next(iter(_workflows.values()), None)
 
+    def _stamp(result, req_mode: Optional[str]) -> dict:
+        """Tag a model verdict with the checkpoint that produced it, so a
+        stored rating can be traced to its weights (metadata.model)."""
+        out = dict(result)
+        if out.get('metadata', {}).get('source') == 'model':
+            mode = _resolve_mode(req_mode)
+            mode = mode if mode in _workflows else next(iter(_workflows), None)
+            out['metadata'] = {**out['metadata'],
+                               'model': {'mode': mode, 'sha256': _loaded_sha.get(mode)}}
+        return out
+
     # Serialize katago runs: each analysis spawns a GPU-bound subprocess,
     # so unbounded concurrency would thrash the device.
     engine_sem = threading.Semaphore(max_concurrency)
@@ -520,7 +539,7 @@ def create_app(
         if not results:
             raise HTTPException(status_code=422,
                                 detail='no output (too few moves?)')
-        return dict(results[0])
+        return _stamp(results[0], req.mode)
 
     @app.post('/rank/file', response_model=KAB2OutputModel)
     def rank_file(req: RankFileRequest):
@@ -538,7 +557,7 @@ def create_app(
         if not results:
             raise HTTPException(status_code=422,
                                 detail='no output (too few moves?)')
-        return dict(results[0])
+        return _stamp(results[0], req.mode)
 
     @app.post('/rank/batch', response_model=List[KAB2OutputModel])
     def rank_batch(req: RankBatchRequest):
@@ -566,7 +585,35 @@ def create_app(
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-        return [dict(r) for r in results]
+        return [_stamp(r, req.mode) for r in results]
+
+    @app.post('/rank/cached')
+    def rank_cached(req: CachedRankRequest):
+        """Re-rank games from their cached KAB2 frames (``kab2_cache``, the
+        training cache: <game_id>.npz) with the loaded model — no KataGo run,
+        so a whole corpus re-rates in minutes after a promotion. Ids with no
+        cached frames come back in ``missing``; review those normally."""
+        if not kab2_cache:
+            raise HTTPException(status_code=400, detail='kab2_cache is not configured')
+        wf = _get_workflow(_resolve_mode(req.mode))
+        if wf is None:
+            raise HTTPException(status_code=503, detail='No rank model loaded')
+        from katarank.data.preprocess import read_kab2_combined
+        from katarank.workflow import result_to_output
+        cache_dir = Path(kab2_cache)
+        results, missing = [], []
+        for gid in req.game_ids:
+            path = cache_dir / f'{gid}.npz'
+            if not _GAME_ID_RE.fullmatch(gid) or not path.is_file():
+                missing.append(gid)
+                continue
+            moves_b, moves_w, _, _ = read_kab2_combined(str(path))
+            if moves_b is None or moves_w is None:
+                missing.append(gid)
+                continue
+            out = result_to_output(wf.rank_frames(moves_b, moves_w, gid))
+            results.append(_stamp(out, req.mode))
+        return {'results': results, 'missing': missing}
 
     @app.post('/review/string', response_model=ReviewOutputModel)
     def review_string(req: RankStringRequest):
@@ -589,7 +636,7 @@ def create_app(
         if not results:
             raise HTTPException(status_code=422,
                                 detail='no output (too few moves?)')
-        return dict(results[0])
+        return _stamp(results[0], req.mode)
 
     @app.post('/review/file', response_model=ReviewOutputModel)
     def review_file(req: RankFileRequest):
@@ -607,7 +654,7 @@ def create_app(
         if not results:
             raise HTTPException(status_code=422,
                                 detail='no output (too few moves?)')
-        return dict(results[0])
+        return _stamp(results[0], req.mode)
 
     @app.post('/review/batch', response_model=List[ReviewOutputModel])
     def review_batch(req: RankBatchRequest):
@@ -635,7 +682,7 @@ def create_app(
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-        return [dict(r) for r in results]
+        return [_stamp(r, req.mode) for r in results]
 
     @app.post('/rank/directory', response_model=List[KAB2OutputModel])
     def rank_directory(req: RankDirectoryRequest):
@@ -655,7 +702,7 @@ def create_app(
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
-        return [dict(r) for r in results]
+        return [_stamp(r, req.mode) for r in results]
 
     @app.post('/ownership/string')
     def ownership_string(req: OwnershipStringRequest):
@@ -767,7 +814,7 @@ _CONFIG_TEMPLATE = """\
 # max_concurrency = 1
 # sgf_root = ""                   # restrict file endpoints to this directory
 # device = ""                     # cpu | cuda (auto-detected)
-# kab2_cache = ""                 # set to enable KAB2 caching; leave empty for pure streaming
+# kab2_cache = ""                 # KAB2 directory /rank/cached reads (the training cache)
 """
 
 
