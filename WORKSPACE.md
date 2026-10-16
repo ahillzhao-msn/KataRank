@@ -58,7 +58,8 @@ lack `batch_analysis`:
 
 ```powershell
 .\scripts\start-katarank.ps1            # headless; settings from ~/.katarank/server.toml
-.\scripts\start-katarank.ps1 -Restart   # after deploying a new binary or checkpoint
+.\scripts\start-katarank.ps1 -Restart   # after deploying new code or a new binary (refuses during training)
+Invoke-RestMethod -Method Post http://127.0.0.1:8765/models/reload   # new checkpoint: no restart needed
 # or in the foreground:
 uv run katarank-server
 ```
