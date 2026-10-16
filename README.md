@@ -315,7 +315,8 @@ uv run katarank-server --model kata1-b18c384nbt.bin.gz \
 | `POST` | `/variation/string` | What-if branch analysis with HumanSL profiles |
 | `GET` | `/health` | Liveness check |
 | `POST` | `/engine/reset` | Soft reset (clear daemon caches) |
-| `POST` | `/engine/restart` | Hard restart (reload models) |
+| `POST` | `/engine/restart` | Hard restart of the KataGo daemon |
+| `POST` | `/models/reload` | Re-read rank-model checkpoints from disk (after a promotion) |
 
 Review endpoints return `ReviewOutput` = `KAB2Output` + `moves` list
 (see `docs/REVIEW_API_DESIGN.md`); request schemas are identical to `/rank/*`.
@@ -385,7 +386,8 @@ with PersistentKataGoEngine(model='kata1.bin.gz', mode='lite') as eng:
     eng.close(force=True)                # kill a wedged daemon
 ```
 
-REST control: `POST /engine/reset` (soft), `POST /engine/restart` (hard),
+REST control: `POST /engine/reset` (soft), `POST /engine/restart` (hard; KataGo only),
+`POST /models/reload` (rank-model weights),
 `GET /health` reports daemon liveness.
 
 ---

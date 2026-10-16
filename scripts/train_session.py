@@ -15,10 +15,9 @@ evaluation gate before promoting:
        holdout)
     7. Candidate strictly better (lower val_loss) → promote: copy into
        the live checkpoint path, record model_versions (active=true,
-       deactivating the previous row), restart the katarank-server
-       process (start-katarank.ps1 -Restart — see auto_train.restart_engine
-       for why this must be a full process restart, not /engine/restart)
-       so the already-running server actually starts serving it
+       deactivating the previous row), and have the running server
+       reload it (auto_train.reload_models — verified by sha256; result
+       field "served")
        Candidate not better → discard: record model_versions with
        active=false (audit trail — a training run happened and did not
        improve on production), live checkpoint untouched
@@ -200,7 +199,7 @@ def _archive_live_checkpoint(conn) -> str | None:
 
 
 def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
-             katarank_url: str, reason: str) -> str:
+             katarank_url: str, reason: str) -> tuple[str, bool]:
     archived_version = _archive_live_checkpoint(conn)
 
     LIVE_CKPT.parent.mkdir(parents=True, exist_ok=True)
@@ -232,9 +231,9 @@ def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
         """, (version, str(LIVE_CKPT), "transformer", "kab2-v3", num_games,
               json.dumps(metrics), commit, notes))
     conn.commit()
-    restarted = at.restart_engine(katarank_url)
-    log.info("Promoted %s (engine_restarted=%s)", version, restarted)
-    return version
+    served = at.reload_models(katarank_url, {"full": LIVE_CKPT})
+    log.info("Promoted %s (now served: %s)", version, served)
+    return version, served
 
 
 def _discard(conn, num_games: int, candidate_metrics: dict, reason: str) -> str:
@@ -356,11 +355,12 @@ def main():
         promote, reason = _better(candidate_metrics, live_metrics)
         if promote:
             _phase("promoting")
-            version = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
-                               args.katarank_url, reason)
+            version, served = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
+                                       args.katarank_url, reason)
             outcome = "promoted"
         else:
             version = _discard(conn, n_total, candidate_metrics, reason)
+            served = None
             outcome = "discarded"
 
         state["last_trained_count"] = total
@@ -374,6 +374,7 @@ def main():
 
         _write_job(phase="idle", running=False, result={
             "skipped": False, "outcome": outcome, "version": version, "reason": reason,
+            "served": served,
             "candidate_metrics": candidate_metrics, "live_metrics": live_metrics,
             "num_games": n_total, "elapsed_seconds": round(time.time() - t0, 1),
         })

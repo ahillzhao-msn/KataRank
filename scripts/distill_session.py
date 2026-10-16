@@ -19,8 +19,8 @@ to the lite (10-dim scalar-only) student model instead of the full model.
     7. Candidate strictly better (lower val_loss, no regression on
        rank_acc_pm1/rating_corr beyond tolerance) → promote: copy into the
        live lite checkpoint path, record model_versions (mode='lite',
-       active=true, deactivating the previous lite row), restart the
-       katarank-server process so it actually serves the new lite model.
+       active=true, deactivating the previous lite row), and have the
+       running server reload it (auto_train.reload_models, sha256-verified).
        Candidate not better → discard: audit-only model_versions row,
        live lite checkpoint untouched.
 
@@ -152,7 +152,7 @@ def _archive_live_lite_checkpoint(conn) -> str | None:
 
 
 def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
-             katarank_url: str, reason: str, teacher_version: str | None) -> str:
+             katarank_url: str, reason: str, teacher_version: str | None) -> tuple[str, bool]:
     archived_version = _archive_live_lite_checkpoint(conn)
 
     LIVE_LITE_CKPT.parent.mkdir(parents=True, exist_ok=True)
@@ -176,9 +176,9 @@ def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
         """, (version, str(LIVE_LITE_CKPT), "transformer", "kab2-v3", num_games,
               json.dumps(metrics), commit, notes))
     conn.commit()
-    restarted = at.restart_engine(katarank_url)
-    log.info("Promoted %s (engine_restarted=%s)", version, restarted)
-    return version
+    served = at.reload_models(katarank_url, {"lite": LIVE_LITE_CKPT})
+    log.info("Promoted %s (now served: %s)", version, served)
+    return version, served
 
 
 def _discard(conn, num_games: int, candidate_metrics: dict, reason: str) -> str:
@@ -313,11 +313,12 @@ def main():
         promote, reason = _better(candidate_metrics, live_metrics)
         if promote:
             _phase("promoting")
-            version = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
-                               args.katarank_url, reason, teacher_version)
+            version, served = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
+                                       args.katarank_url, reason, teacher_version)
             outcome = "promoted"
         else:
             version = _discard(conn, n_total, candidate_metrics, reason)
+            served = None
             outcome = "discarded"
 
         state["last_lite_trained_count"] = total
@@ -332,6 +333,7 @@ def main():
 
         _write_job(phase="idle", running=False, result={
             "skipped": False, "outcome": outcome, "version": version, "reason": reason,
+            "served": served,
             "candidate_metrics": candidate_metrics, "live_metrics": live_metrics,
             "num_games": n_total, "elapsed_seconds": round(time.time() - t0, 1),
         })
