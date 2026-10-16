@@ -73,6 +73,13 @@ class ModelsReloadTest(unittest.TestCase):
 
 
 def _auto_train():
+    # auto_train imports psycopg2 at module level for its DB writes; the
+    # package isn't a declared dependency (CI lacks it) and reload_models
+    # never touches the database.
+    try:
+        import psycopg2  # noqa: F401
+    except ImportError:
+        sys.modules["psycopg2"] = mock.MagicMock()
     sys.path.insert(0, str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location("auto_train", ROOT / "scripts" / "auto_train.py")
     mod = importlib.util.module_from_spec(spec)
