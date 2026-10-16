@@ -317,6 +317,7 @@ uv run katarank-server --model kata1-b18c384nbt.bin.gz \
 | `POST` | `/engine/reset` | Soft reset (clear daemon caches) |
 | `POST` | `/engine/restart` | Hard restart of the KataGo daemon |
 | `POST` | `/models/reload` | Re-read rank-model checkpoints from disk (after a promotion) |
+| `POST` | `/rank/cached` | Re-rank game ids from cached KAB2 frames (`kab2_cache`), no KataGo |
 
 Review endpoints return `ReviewOutput` = `KAB2Output` + `moves` list
 (see `docs/REVIEW_API_DESIGN.md`); request schemas are identical to `/rank/*`.

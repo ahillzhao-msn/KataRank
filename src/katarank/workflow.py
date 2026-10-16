@@ -314,6 +314,17 @@ class InferenceWorkflow:
             results.append(result)
         return results
 
+    def rank_frames(self, moves_b: np.ndarray, moves_w: np.ndarray,
+                    game_id: str) -> RankResult:
+        """Rank from precomputed KAB2 frames (e.g. the training cache), no
+        KataGo run. Frames wider than the model's input — the full-width
+        cache fed to a lite model — keep their leading columns, the same
+        convention distillation and evaluation use."""
+        dim = self.model.get_config().get('input_dim', moves_b.shape[1])
+        x_b = torch.from_numpy(np.ascontiguousarray(moves_b[:, :dim], dtype=np.float32))
+        x_w = torch.from_numpy(np.ascontiguousarray(moves_w[:, :dim], dtype=np.float32))
+        return self._infer_one(x_b, x_w, {'game_id': game_id}, {})
+
     @torch.no_grad()
     def _infer_one(self, x_b, x_w, info_b, info_w) -> RankResult:
         gid = info_b.get('game_id', '')
