@@ -272,15 +272,23 @@ def create_app(
 
     # Load rank models — supports dual checkpoints (full + lite)
     from katarank.model import KataRankModel  # type: ignore
+    import hashlib
     _workflows: dict[str, InferenceWorkflow] = {}
-    if checkpoint_path:
-        _workflows['full'] = InferenceWorkflow(
-            KataRankModel.load(checkpoint_path), engine, device=device)
-        logger.info('Loaded full model from %s', checkpoint_path)
-    if checkpoint_lite:
-        _workflows['lite'] = InferenceWorkflow(
-            KataRankModel.load(checkpoint_lite), engine, device=device)
-        logger.info('Loaded lite model from %s', checkpoint_lite)
+    _checkpoints = {m: p for m, p in (('full', checkpoint_path), ('lite', checkpoint_lite)) if p}
+    _loaded_sha: dict[str, str] = {}  # mode -> sha256 of the checkpoint file now in memory
+    _reload_lock = threading.Lock()
+
+    def _load_workflow(mode: str) -> None:
+        """(Re)load one checkpoint from disk. The workflow is swapped in only
+        once it has loaded, so a failed reload leaves the old one serving."""
+        path = _checkpoints[mode]
+        sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        _workflows[mode] = InferenceWorkflow(KataRankModel.load(path), engine, device=device)
+        _loaded_sha[mode] = sha
+        logger.info('Loaded %s model from %s (sha256 %s)', mode, path, sha[:12])
+
+    for _mode in _checkpoints:
+        _load_workflow(_mode)
 
     def _get_workflow(mode: str) -> Optional[InferenceWorkflow]:
         return _workflows.get(mode) or next(iter(_workflows.values()), None)
@@ -318,6 +326,7 @@ def create_app(
             'status':              'ok' if ok else 'degraded',
             'model_loaded':        bool(_workflows),
             'models':              list(_workflows.keys()),
+            'checkpoint_sha256':   dict(_loaded_sha),
             'engine_mode':         engine_mode,
             'engine_persistent':   persistent,
             'engine_ready':        batch_alive,
@@ -337,9 +346,26 @@ def create_app(
             raise HTTPException(status_code=500, detail=str(e))
         return {'status': 'reset'}
 
+    @app.post('/models/reload')
+    def models_reload():
+        """Re-read the configured rank-model checkpoints from disk and swap
+        them in — how a promoted checkpoint gets served without restarting
+        the process (which would also kill a training session: those run as
+        this server's children). In-flight requests finish on the workflow
+        they already hold. Returns the sha256 of each file now in memory."""
+        with _reload_lock:
+            try:
+                for mode in _checkpoints:
+                    _load_workflow(mode)
+            except Exception as e:
+                logger.exception('Model reload failed')
+                raise HTTPException(status_code=500, detail=f'Model reload failed: {e}')
+        return {'status': 'reloaded', 'checkpoint_sha256': dict(_loaded_sha)}
+
     @app.post('/engine/restart')
     def engine_restart():
-        """Hard restart: kill the daemon and reload models."""
+        """Hard restart of the KataGo daemon. Rank-model weights are not
+        reloaded — that is /models/reload."""
         if not persistent:
             raise HTTPException(status_code=400,
                                 detail="No persistent engine (started with persistent=False)")

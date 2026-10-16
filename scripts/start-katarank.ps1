@@ -9,11 +9,17 @@
         .\scripts\start-katarank.ps1            # start
         .\scripts\start-katarank.ps1 -Stop      # stop
         .\scripts\start-katarank.ps1 -Restart    # restart (reload new code)
+
+    -Stop and -Restart refuse while a training or distillation session is
+    running: those are the server's child processes and die with it. Add
+    -Force to stop anyway. A promoted checkpoint needs no restart at all
+    (POST /models/reload).
 #>
 
 param(
     [switch]$Stop,
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,15 +35,36 @@ function Test-ServerUp {
     }
 }
 
+function Get-RunningSession {
+    foreach ($kind in "train", "distill") {
+        try {
+            $s = Invoke-RestMethod -Uri "http://127.0.0.1:${Port}/${kind}/status" -TimeoutSec 3 -ErrorAction Stop
+            if ($s.running -and $s.process_alive) { return $kind }
+        } catch {}
+    }
+    return $null
+}
+
 function Stop-KataRank {
+    $session = Get-RunningSession
+    if ($session -and -not $Force) {
+        Write-Error "A $session session is running and would be killed with the server. Wait for it, or pass -Force."
+        exit 1
+    }
     $procs = Get-Process -Name "katarank-server" -ErrorAction SilentlyContinue
     if ($procs) {
-        $procs | Stop-Process -Force -Confirm:$false
-        Write-Host "Stopped katarank-server (pid $($procs.Id -join ', '))"
+        # The launcher exe runs the server as a child python process: kill the
+        # whole tree, or the server keeps the port and the old code/weights.
+        foreach ($p in $procs) { taskkill /PID $p.Id /T /F | Out-Null }
+        Write-Host "Stopped katarank-server tree (pid $($procs.Id -join ', '))"
     } else {
         Write-Host "No katarank-server process found"
     }
-    Start-Sleep -Seconds 2
+    for ($i = 0; $i -lt 10 -and (Test-ServerUp); $i++) { Start-Sleep -Seconds 1 }
+    if (Test-ServerUp) {
+        Write-Error "Port $Port still answers after stopping katarank-server - another server process is running."
+        exit 1
+    }
 }
 
 if ($Stop) {

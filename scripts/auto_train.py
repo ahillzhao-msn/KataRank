@@ -49,7 +49,6 @@ DB_DSN = "host=localhost port=5432 dbname=gopredict user=gopredict password=gopr
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 KATARANK_TRAIN = [sys.executable, "-m", "katarank.train.training"]
 KATARANK_DISTILL = [sys.executable, "-m", "katarank.train.distill"]
-START_SCRIPT = PROJECT_ROOT / "scripts" / "start-katarank.ps1"
 
 _TOML_PATH = Path.home() / ".katarank" / "server.toml"
 
@@ -506,43 +505,40 @@ def _load_training_report(ckpt_dir: Path) -> dict | None:
     return json.loads(report.read_text(encoding="utf-8"))
 
 
-def restart_engine(katarank_url: str = "http://127.0.0.1:8765") -> bool:
-    """Reload the running katarank-server so a newly-promoted checkpoint
-    (full OR lite) actually gets served.
+def reload_models(katarank_url: str, expected: dict[str, Path]) -> bool:
+    """Make the running katarank-server serve a newly-promoted checkpoint.
 
-    IMPORTANT: this is a full process restart, not a lighter-weight call.
-    `POST /engine/restart` (see api/server.py) only restarts the katago
-    analysis daemon subprocess — it does NOT reload the PyTorch
-    KataRankModel weights, which api/server.py's create_app() loads once
-    at process startup and never again. A promotion that only hits that
-    endpoint leaves the just-promoted checkpoint sitting correctly on disk
-    while the running process keeps serving the OLD weights from memory
-    indefinitely, with no visible error (confirmed by hand while fixing
-    the missing optimizer_state.pt issue — see GOPredict conversation).
-    start-katarank.ps1 -Restart is the only thing that actually works:
-    it kills and respawns the server process, which re-reads whatever is
-    currently on disk.
+    POST /models/reload re-reads the server's configured checkpoints into
+    memory (the weights are otherwise loaded once at startup), then each
+    returned sha256 is checked against the file just promoted — a server
+    pointed at a different path, or one too old to have the endpoint,
+    reports False instead of a silent "restarted". `expected` maps mode
+    ('full'/'lite') to the live checkpoint path.
+
+    Not a process restart: training and distillation sessions run as the
+    server's children, so restarting it from here would kill the caller.
     """
-    if not START_SCRIPT.exists():
-        log.warning("start-katarank.ps1 not found at %s — checkpoint is on disk "
-                    "but the running server still has the old weights loaded "
-                    "until it's restarted some other way.", START_SCRIPT)
-        return False
+    import hashlib
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(f"{katarank_url.rstrip('/')}/models/reload",
+                                 data=b"", method="POST")
     try:
-        result = subprocess.run(
-            ["powershell", "-File", str(START_SCRIPT), "-Restart"],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            log.warning("start-katarank.ps1 -Restart exited %d: %s",
-                       result.returncode, result.stdout + result.stderr)
-            return False
-        return True
-    except Exception as e:  # noqa: BLE001
-        log.warning("Engine restart failed (%s) — checkpoint is on disk but "
-                    "the running server still has the old weights loaded "
-                    "until it's restarted some other way.", e)
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            loaded = json.loads(resp.read()).get("checkpoint_sha256", {})
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        log.warning("Model reload failed (%s) — the checkpoint is on disk but the "
+                    "running server still serves the old weights.", e)
         return False
+    ok = True
+    for mode, path in expected.items():
+        want = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        if loaded.get(mode) != want:
+            log.warning("Server's %s model (sha256 %s) is not %s (sha256 %s)",
+                        mode, (loaded.get(mode) or "none")[:12], path, want[:12])
+            ok = False
+    return ok
 
 
 def _git_commit() -> str:

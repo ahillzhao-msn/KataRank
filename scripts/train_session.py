@@ -15,10 +15,9 @@ evaluation gate before promoting:
        holdout)
     7. Candidate strictly better (lower val_loss) → promote: copy into
        the live checkpoint path, record model_versions (active=true,
-       deactivating the previous row), restart the katarank-server
-       process (start-katarank.ps1 -Restart — see auto_train.restart_engine
-       for why this must be a full process restart, not /engine/restart)
-       so the already-running server actually starts serving it
+       deactivating the previous row), and have the running server
+       reload it (auto_train.reload_models — verified by sha256; result
+       field "served")
        Candidate not better → discard: record model_versions with
        active=false (audit trail — a training run happened and did not
        improve on production), live checkpoint untouched
@@ -33,6 +32,7 @@ poll without parsing log output. Usage:
 
     uv run python scripts/train_session.py
     uv run python scripts/train_session.py --force --threshold 500
+    uv run python scripts/train_session.py --promote-candidate "why"   # see _promote_override
 """
 from __future__ import annotations
 
@@ -200,7 +200,7 @@ def _archive_live_checkpoint(conn) -> str | None:
 
 
 def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
-             katarank_url: str, reason: str) -> str:
+             katarank_url: str, reason: str) -> tuple[str, bool]:
     archived_version = _archive_live_checkpoint(conn)
 
     LIVE_CKPT.parent.mkdir(parents=True, exist_ok=True)
@@ -232,9 +232,9 @@ def _promote(conn, candidate_ckpt: Path, num_games: int, metrics: dict,
         """, (version, str(LIVE_CKPT), "transformer", "kab2-v3", num_games,
               json.dumps(metrics), commit, notes))
     conn.commit()
-    restarted = at.restart_engine(katarank_url)
-    log.info("Promoted %s (engine_restarted=%s)", version, restarted)
-    return version
+    served = at.reload_models(katarank_url, {"full": LIVE_CKPT})
+    log.info("Promoted %s (now served: %s)", version, served)
+    return version, served
 
 
 def _discard(conn, num_games: int, candidate_metrics: dict, reason: str) -> str:
@@ -251,6 +251,46 @@ def _discard(conn, num_games: int, candidate_metrics: dict, reason: str) -> str:
     conn.commit()
     log.info("Discarded candidate (%s) — did not beat live model", version)
     return version
+
+
+def _promote_override(args, reason: str) -> None:
+    """Promote the candidate the last session left in CANDIDATE_DIR even
+    though the gate rejected it — for a deliberate, recorded decision (e.g.
+    the live model was trained on broken features, so its holdout score is
+    no fair bar). Both checkpoints are evaluated afresh on the current V
+    split, and the real metrics, the gate's own verdict and the given
+    reason all go into model_versions.notes and the train_state run log.
+    The gate itself is unchanged; nothing calls this automatically.
+    """
+    candidate_ckpt = CANDIDATE_DIR / "best.pt"
+    if not candidate_ckpt.exists():
+        raise SystemExit(f"No candidate at {candidate_ckpt}")
+    if JOB_FILE.exists() and json.loads(JOB_FILE.read_text(encoding="utf-8")).get("running"):
+        # The running session is still writing CANDIDATE_DIR.
+        raise SystemExit(f"A training session is running ({JOB_FILE}); wait for it to finish")
+    candidate_metrics = _evaluate(candidate_ckpt, args.cache_dir)
+    live_metrics = (_evaluate(LIVE_CKPT, args.cache_dir) if LIVE_CKPT.exists()
+                    else {"val_loss": float("inf")})
+    log.info("candidate=%s  live=%s", candidate_metrics, live_metrics)
+    gate_promote, gate_reason = _better(candidate_metrics, live_metrics)
+    note = f"manual override ({reason}); gate {'passed' if gate_promote else 'rejected'}: {gate_reason}"
+
+    n_total = len(at.get_cached_game_ids(args.cache_dir))
+    conn = psycopg2.connect(args.db_dsn)
+    try:
+        version, served = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
+                                   args.katarank_url, note)
+    finally:
+        conn.close()
+    state = at._load_state()
+    state.setdefault("runs", []).append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cached_kab2": n_total, "outcome": "promoted_override", "version": version,
+        "reason": note, "served": served,
+        "candidate_metrics": candidate_metrics, "live_metrics": live_metrics,
+    })
+    at._save_state(state)
+    log.info("Override-promoted %s (served=%s): %s", version, served, note)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -270,7 +310,14 @@ def main():
                              "live checkpoint (full 150-epoch budget, no --resume, "
                              "no optimizer-state continuation). Both modes stay "
                              "available: default is incremental continuation.")
+    parser.add_argument("--promote-candidate", metavar="REASON",
+                        help="Don't train: promote the candidate the last session "
+                             "left in nets/_candidate over the gate's verdict, "
+                             "recording REASON and both models' fresh metrics.")
     args = parser.parse_args()
+    if args.promote_candidate:
+        _promote_override(args, args.promote_candidate)
+        return
 
     t0 = time.time()
     _write_job(started_at=datetime.now(timezone.utc).isoformat(), result=None)
@@ -356,11 +403,12 @@ def main():
         promote, reason = _better(candidate_metrics, live_metrics)
         if promote:
             _phase("promoting")
-            version = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
-                               args.katarank_url, reason)
+            version, served = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
+                                       args.katarank_url, reason)
             outcome = "promoted"
         else:
             version = _discard(conn, n_total, candidate_metrics, reason)
+            served = None
             outcome = "discarded"
 
         state["last_trained_count"] = total
@@ -374,6 +422,7 @@ def main():
 
         _write_job(phase="idle", running=False, result={
             "skipped": False, "outcome": outcome, "version": version, "reason": reason,
+            "served": served,
             "candidate_metrics": candidate_metrics, "live_metrics": live_metrics,
             "num_games": n_total, "elapsed_seconds": round(time.time() - t0, 1),
         })
