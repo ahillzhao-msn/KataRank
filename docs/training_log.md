@@ -189,7 +189,8 @@ Epoch 6-150: Cosine annealing  lr → lr_min (1e-5)
 ### 2.4 审计：Phase 2 训练数据的两处缺陷 (2026-10-14)
 
 复核 Phase 2 Teacher（2.3）与 Lite（3.4）时发现，其训练数据存在两处缺陷，**两者报告的指标
-都不能当作模型能力的度量**。原 checkpoint 与报告保留在 `nets/` 中，未作改动；此处只作记录。
+都不能当作模型能力的度量**。原 checkpoint 与报告已被 2.5 的重训结果替换，旧版本在 git 历史
+（提交 8f7fdc5 及之前）的 `nets/` 中。
 
 受影响的还有此后的所有线上版本，因为它们都在同一批数据上训练（见 GOPredict `model_versions` 表）：
 - Full v20260811_022603：31,362 局，rank_acc 69.1%，±1 95.9%。由 v20260620_full_001 续训，手动放行晋升。
@@ -221,6 +222,27 @@ Teacher 输入层 trunk 列的权重范数约 0.2，标量列约 1.07，即 trun
 KataRank `/train/start` → `scripts/train_session.py --force --from-scratch`。会话在暂存区训练，
 在同一 holdout 上与线上模型比较，胜出才晋升。旧缓存移至 `~/.katarank/kab2_cache_v1_zerotrunk`：其中
 标量列与新二进制逐位一致，trunk 为 0，标签为旧锚点。
+
+### 2.5 修正数据上的重训 (2026-10-16)
+
+数据为重新生成的 `~/.katarank/kab2_cache`（32,383 个文件；随机抽 20 个，trunk 全部非零、
+`human_anchor_ver` 全部为 2）。指标取自各自的 `training_report.json`，在 V 集上计算。
+
+| | Full | Lite（蒸馏） |
+|---|---|---|
+| checkpoint | `nets/katarank/best.pt` | `nets/katarank_lite/best_lite.pt` |
+| input_dim / hidden_dim | 1034 / 128 | 10 / 64 |
+| 参数量 | 2.26M | 540K |
+| 训练 / 验证局数 | 29,123 / 3,235 | 29,144 / 3,238 |
+| 轮数（最佳） | 150（143） | 100（95），Teacher = 本表 Full，T = 2.0 |
+| rank_acc | 30.4% | 22.6% |
+| rank_acc_pm1 | **70.0%** | **57.2%** |
+| rank_mae | 1.26 | 1.73 |
+| rating_corr | 0.994 | 0.978 |
+
+与 2.4 之前的数字（±1 约 95%）相比大幅下降，因为现在的标签不再是输入标量的公式，这才是真实的
+段位判断难度。Full 比 Lite 高 13 个百分点（±1）；修复前两者几乎持平（trunk 全为 0），所以差距
+很可能主要来自 trunk 向量，但 Lite 的 hidden_dim 也更小，严格结论要等下文的 trunk A/B。
 
 ## 3. V2 Lite Model — 知识蒸馏
 
@@ -312,6 +334,9 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 4. **103x 信息压缩** (1034→10 dim) 只损失了 2% 的 rank_acc_pm1
 5. 蒸馏证明了 KataGo trunk vectors 中的段位信息**大部分可以从标量统计中恢复**
 
+> 以上结论建立在 trunk 全为 0、标签为公式的数据上（见 2.4），已不成立：修正数据后 Full / Lite 的
+> ±1 准确率为 70.0% / 57.2%（2.5）。
+
 ---
 
 ## 4. 模型对比总览
@@ -349,9 +374,9 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 - [x] Phase 2: 全量 Teacher 训练 (27.2k 游戏, val_loss 0.7727) — 指标作废，见 2.4
 - [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%) — 指标作废，见 2.4
 - [x] Lite 模型部署 — engine_mode=lite 为线上默认推理模式
+- [x] 全量重训（2026-10-16）— 新 KAB2（真实 trunk + 锚点 v2）上从头训练 Full（±1 70.0%），再蒸馏 Lite（±1 57.2%）；见 2.5
 
 ### 下一步
-- **全量重训（进行中，2026-10-14 起）** — 新 KAB2（真实 trunk + 锚点 v2）上从头训练 Full，再蒸馏 Lite；见 2.4
 - **trunk A/B** — 同一份数据上对比真实 trunk 与清零 trunk，确认 Full 相对 Lite 的价值
 - **数据扩充** — 数据量收益未饱和，更多游戏预期继续改善
 - **模型容量探索** — hidden_dim 128→256, depth+1
