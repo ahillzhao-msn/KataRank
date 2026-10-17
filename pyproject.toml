@@ -16,6 +16,9 @@ dependencies = [
     "httptools>=0.6",
     "jinja2>=3.0",
     "numpy>=1.24",
+    # train_session.py / distill_session.py / auto_train.py record model
+    # versions in GOPredict's Postgres; the server spawns them.
+    "psycopg2-binary>=2.9",
     "pydantic>=2.0",
     "pydantic-core>=2.0",
     "python-dotenv>=1.0",
@@ -58,7 +61,8 @@ pythonpath = ["src"]
 
 [tool.uv.sources]
 katarank = { workspace = true }
-torch = { index = "pytorch-cu126" }
+# CUDA wheels for the Windows GPU host; elsewhere (CI) PyPI's default build.
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
