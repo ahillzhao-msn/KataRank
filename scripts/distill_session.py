@@ -30,6 +30,7 @@ each needs its own phase/progress state). Usage:
 
     uv run python scripts/distill_session.py
     uv run python scripts/distill_session.py --force --threshold 500
+    uv run python scripts/distill_session.py --promote-candidate "why"   # see _promote_override
 """
 from __future__ import annotations
 
@@ -197,6 +198,49 @@ def _discard(conn, num_games: int, candidate_metrics: dict, reason: str) -> str:
     return version
 
 
+def _promote_override(args, reason: str) -> None:
+    """Promote the candidate the last session left in CANDIDATE_LITE_DIR even
+    though the gate rejected it — lite counterpart of train_session.py's
+    _promote_override, for a deliberate, recorded decision. Both lite
+    checkpoints are evaluated afresh on the current V split, and the real
+    metrics, the gate's own verdict and the given reason all go into
+    model_versions.notes and the lite_runs log. The gate itself is
+    unchanged; nothing calls this automatically.
+    """
+    candidate_ckpt = CANDIDATE_LITE_DIR / "best_lite.pt"
+    if not candidate_ckpt.exists():
+        raise SystemExit(f"No candidate at {candidate_ckpt}")
+    job = json.loads(JOB_FILE.read_text(encoding="utf-8")) if JOB_FILE.exists() else {}
+    if job.get("running"):
+        # The running session is still writing CANDIDATE_LITE_DIR.
+        raise SystemExit(f"A distillation session is running ({JOB_FILE}); wait for it to finish")
+    # The candidate was distilled by the session recorded in JOB_FILE.
+    teacher_version = job.get("teacher_version")
+    candidate_metrics = _evaluate(candidate_ckpt, args.cache_dir)
+    live_metrics = (_evaluate(LIVE_LITE_CKPT, args.cache_dir) if LIVE_LITE_CKPT.exists()
+                    else {"val_loss": float("inf")})
+    log.info("candidate=%s  live=%s", candidate_metrics, live_metrics)
+    gate_promote, gate_reason = _better(candidate_metrics, live_metrics)
+    note = f"manual override ({reason}); gate {'passed' if gate_promote else 'rejected'}: {gate_reason}"
+
+    n_total = len(at.get_cached_game_ids(args.cache_dir))
+    conn = psycopg2.connect(args.db_dsn)
+    try:
+        version, served = _promote(conn, candidate_ckpt, n_total, candidate_metrics,
+                                   args.katarank_url, note, teacher_version)
+    finally:
+        conn.close()
+    state = at._load_state()
+    state.setdefault("lite_runs", []).append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cached_kab2": n_total, "teacher_version": teacher_version,
+        "outcome": "promoted_override", "version": version, "reason": note, "served": served,
+        "candidate_metrics": candidate_metrics, "live_metrics": live_metrics,
+    })
+    at._save_state(state)
+    log.info("Override-promoted %s (served=%s): %s", version, served, note)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -215,7 +259,14 @@ def main():
                         help="Train a fresh student instead of continuing from the "
                              "live lite checkpoint. Both modes stay available: "
                              "default is incremental continuation.")
+    parser.add_argument("--promote-candidate", metavar="REASON",
+                        help="Don't distill: promote the candidate the last session "
+                             "left in nets/_candidate_lite over the gate's verdict, "
+                             "recording REASON and both models' fresh metrics.")
     args = parser.parse_args()
+    if args.promote_candidate:
+        _promote_override(args, args.promote_candidate)
+        return
 
     t0 = time.time()
     _write_job(started_at=datetime.now(timezone.utc).isoformat(), result=None)
