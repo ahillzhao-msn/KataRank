@@ -277,7 +277,7 @@ See `docs/training-guide.md` §3.2. Running `scripts/auto_train.py` directly ski
 The training module can also be run directly for experiments:
 
 ```bash
-uv run katarank-train --data-dir data/kab2 --epochs 100
+uv run katarank-train --data-dir ~/.katarank/kab2_cache --epochs 100
 uv run katarank-train --config src/katarank/train/config_kata_native.yaml
 ```
 

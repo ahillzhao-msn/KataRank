@@ -10,7 +10,7 @@
 两端段位（20k-3k、7d-9d）按上述三档处理，不强制验证集存在。
 
 Usage:
-    uv run python scripts/validate_split.py --meta data/kab2/_meta.csv
+    uv run python scripts/validate_split.py --meta ~/.katarank/kab2_cache/_meta.csv
 """
 
 import argparse
