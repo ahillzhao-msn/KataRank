@@ -10,7 +10,7 @@ model:
   num_rank_classes: 29       # 20k … 9d
 
 training:
-  data_dir: "data/kab2"
+  data_dir: "~/.katarank/kab2_cache"   # the cache auto_train/train_session maintain
   meta_csv: ~                # null = auto-detect data_dir/_meta.csv
   train_split: "T"
   val_split: "V"

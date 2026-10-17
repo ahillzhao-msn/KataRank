@@ -2,7 +2,7 @@
 KataRank — Training Entry Point
 
 Usage:
-    uv run katarank-train --data-dir data/kab2 --meta data/kab2/_meta.csv
+    uv run katarank-train --data-dir ~/.katarank/kab2_cache
     uv run katarank-train --config src/katarank/train/config_kata_native.yaml --resume nets/best.pt
 """
 
@@ -296,6 +296,7 @@ def main():
     if args.patience: tc['patience']  = args.patience
     if args.lr:       tc['learning_rate'] = args.lr
     if args.batch_size: tc['batch_size'] = args.batch_size
+    tc['data_dir'] = os.path.expanduser(tc['data_dir'])
 
     print("=" * 60)
     print("KataRank — KAB2 Training")

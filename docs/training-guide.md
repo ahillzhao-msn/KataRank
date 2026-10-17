@@ -84,7 +84,7 @@ model:
   dropout: 0.2
 
 training:
-  data_dir: "data/kab2"
+  data_dir: "~/.katarank/kab2_cache"
   batch_size: 32
   epochs: 150
   learning_rate: 0.0005
@@ -101,7 +101,7 @@ training:
 训练前必须执行：
 
 ```bash
-uv run python scripts/validate_split.py --meta data/kab2/_meta.csv
+uv run python scripts/validate_split.py --meta ~/.katarank/kab2_cache/_meta.csv
 ```
 
 检验标准：
