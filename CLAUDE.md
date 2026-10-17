@@ -59,10 +59,10 @@ Two baseline models are checked into the repo:
 
 | Model | Path | Input | Params | rank_acc_pm1 | rating_corr |
 |-------|------|-------|--------|-------------|-------------|
-| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 |
-| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 |
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.0% | 0.9937 |
+| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 57.2% | 0.9780 |
 
-Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were trained on all-zero trunk with legacy (formula-like) HumanSL labels — their metrics are void (training_log §2.4); a retrain is in progress.** Production training: the gated session GoPredict triggers (`POST /api/v1/models/train` → `/train/start` → `scripts/train_session.py`, which reuses `scripts/auto_train.py` steps 1–4 and promotes only a candidate that beats the live model) — `docs/training-guide.md` §3.2.
+Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were retrained on corrected KAB2 (real trunk + anchor v2 labels) on 2026-10-16 (training_log §2.5); the earlier ~95% figures came from all-zero trunk and formula-like labels and are void (§2.4).** Production training: the gated session GoPredict triggers (`POST /api/v1/models/train` → `/train/start` → `scripts/train_session.py`, which reuses `scripts/auto_train.py` steps 1–4 and promotes only a candidate that beats the live model) — `docs/training-guide.md` §3.2.
 
 ### Model (`src/katarank/model/`)
 

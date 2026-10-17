@@ -27,16 +27,19 @@ Two baseline checkpoints are included in the repository:
 
 | Model | Checkpoint | Input | Params | rank_acc_pm1 | rating_corr | Use case |
 |-------|-----------|-------|--------|-------------|-------------|----------|
-| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 96.4% | 0.9949 | Best accuracy (requires KataGo trunk vectors) |
-| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 94.8% | 0.9918 | Fast inference (scalar features only, no trunk) |
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.0% | 0.9937 | Best accuracy (requires KataGo trunk vectors) |
+| **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 57.2% | 0.9780 | Fast inference (scalar features only, no trunk) |
 
 Both models predict Go player rank (20k–9d, 29 classes) from game records. The Lite model was distilled from the Full model and needs only 10 scalar features per move.
+`rank_acc_pm1` is the share of validation players whose predicted rank is within ±1 of the label
+(rank MAE: Full 1.26, Lite 1.73).
 
-> **These checkpoints and metrics predate two data fixes (2026-10).** They were trained on KAB2
-> whose trunk columns were all zero, with HumanSL labels from the legacy 3-profile window, which
-> were effectively a formula of the input scalars. The numbers measure how well the model
-> reproduces that formula, not rank-assessment skill. A full retrain on corrected data is under way;
-> see `docs/training_log.md` §2.4.
+> **Retrained on corrected data (2026-10-16).** Both checkpoints were trained on KAB2 with real
+> trunk vectors and HumanSL anchor v2 labels. The earlier checkpoints (±1 accuracy 96.4% / 94.8%)
+> were trained on data with all-zero trunks and labels that were a formula of the input scalars, so
+> their numbers measured how well the model reproduced that formula; they are not comparable with
+> these. Full now leads Lite by 13 points, likely mostly from the trunk vectors (a trunk A/B test is
+> still to come). See `docs/training_log.md` §2.4–2.5.
 
 **Using the models:**
 
