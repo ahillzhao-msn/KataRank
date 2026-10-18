@@ -12,7 +12,7 @@ Inherits from BaseKAB2Dataset — each item is a KAB2Sample.
 
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -23,6 +23,11 @@ from katarank.schema import (
     KAB2Sample,
     kab2_make_sample,
     kab2_collate,
+)
+from katarank.data.anchor_calibration import (
+    DEFAULT_CALIBRATION,
+    AnchorCalibration,
+    effective_rank_idx,
 )
 from katarank.data.preprocess import read_kab2_combined, probe_kab2_dim
 
@@ -66,7 +71,14 @@ class KAB2Dataset(BaseKAB2Dataset):
         max_moves_per_player: int = 400,
         min_moves_per_player: int = 5,
         cache: bool = True,
+        anchor_calibration: Union[str, Path, None] = 'default',
     ):
+        """
+        anchor_calibration: rows labelled by an older HumanSL anchor are mapped onto the
+            current anchor's scale (see katarank.data.anchor_calibration). 'default' uses
+            the repo artifact when it exists; a path uses that file; None trains on every
+            row's raw label.
+        """
         self.data_dir = Path(data_dir)
         self.split = split
         self.max_moves = max_moves_per_player
@@ -74,15 +86,39 @@ class KAB2Dataset(BaseKAB2Dataset):
         self.cache = cache
         self._move_cache: Dict[str, Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
 
+        if anchor_calibration == 'default':
+            self.anchor_calibration_path: Optional[Path] = (
+                DEFAULT_CALIBRATION if DEFAULT_CALIBRATION.exists() else None)
+        else:
+            self.anchor_calibration_path = Path(anchor_calibration) if anchor_calibration else None
+        self.anchor_calibration = (AnchorCalibration.load(self.anchor_calibration_path)
+                                   if self.anchor_calibration_path else None)
+        self.calibrated_labels = 0   # player labels remapped by anchor_calibration
+
         meta_path = meta_csv or str(self.data_dir / '_meta.csv')
         self.games = self._load_meta(meta_path, split)
 
         self._input_dim = self._detect_input_dim()
 
+        cal = (f"  anchor calibration: {self.calibrated_labels} labels "
+               f"v{self.anchor_calibration.source_anchor}→v{self.anchor_calibration.target_anchor}"
+               if self.anchor_calibration else "")
         print(
             f"KAB2Dataset: {len(self.games)} games "
-            f"split='{split}'  input_dim={self._input_dim}"
+            f"split='{split}'  input_dim={self._input_dim}{cal}"
         )
+
+    def anchor_calibration_info(self) -> Optional[Dict]:
+        """Provenance of the calibration applied to this dataset (for training reports)."""
+        if self.anchor_calibration is None:
+            return None
+        return {
+            'path':              str(self.anchor_calibration_path),
+            'sha256':            AnchorCalibration.file_sha256(self.anchor_calibration_path),
+            'source_anchor':     self.anchor_calibration.source_anchor,
+            'target_anchor':     self.anchor_calibration.target_anchor,
+            'calibrated_labels': self.calibrated_labels,
+        }
 
     @property
     def input_dim(self) -> int:
@@ -109,6 +145,11 @@ class KAB2Dataset(BaseKAB2Dataset):
                 rank_b_idx = rank_str_to_idx(row.get('B_humanRank', ''))
                 rank_w_idx = rank_str_to_idx(row.get('W_humanRank', ''))
 
+                if rank_b_idx >= 0:
+                    rank_b_idx = self._calibrated(row, 'B', rank_b_idx)
+                if rank_w_idx >= 0:
+                    rank_w_idx = self._calibrated(row, 'W', rank_w_idx)
+
                 b_hlp = self._float_or(row.get('B_humanLogPrior'))
                 w_hlp = self._float_or(row.get('W_humanLogPrior'))
                 if b_hlp == 0.0:
@@ -126,6 +167,13 @@ class KAB2Dataset(BaseKAB2Dataset):
                     'human_lp_w':  w_hlp,
                 })
         return games
+
+    def _calibrated(self, row: Dict, side: str, raw_idx: int) -> int:
+        idx = effective_rank_idx(row, side, self.anchor_calibration)
+        if idx is None:
+            return raw_idx
+        self.calibrated_labels += 1
+        return idx
 
     def _game_path(self, game_id: str) -> Path:
         return self.data_dir / f"{game_id}.npz"
