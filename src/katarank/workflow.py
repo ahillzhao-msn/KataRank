@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from katarank.data.anchor_calibration import load_default_calibration
 from katarank.schema import (
     KAB2Output, MoveRecord, ReviewOutput,
     kab2_make_sample, kab2_collate,
@@ -96,6 +97,35 @@ class RankResult(TypedDict):
     w_rank_probs: Optional[torch.Tensor]
     b_rank_top:   int              # argmax rank index (0=20k … 28=9d), -1 if unavailable
     w_rank_top:   int
+    b_rank:       int              # calibrated posterior mean, rounded; -1 if unavailable
+    w_rank:       int
+    b_rank_exp:   Optional[float]  # calibrated posterior mean on the v3 anchor scale
+    w_rank_exp:   Optional[float]
+
+
+def rank_readout(probs, calibration=None):
+    """(expected rank, rounded index, argmax index) from a 29-class posterior.
+
+    The rank head is ordinal: its argmax is the peak of a scalar threshold
+    model, not an estimate — the peak histogram has holes between adjacent
+    classes even though the labels are dense. The posterior mean is continuous
+    and is the squared-error-optimal point estimate; the calibration maps it
+    from the model's v2 anchor scale onto the v3 scale the labels use now.
+    """
+    if probs is None:
+        return None, -1, -1
+    p = probs.detach().cpu().numpy() if hasattr(probs, 'detach') else np.asarray(probs, dtype=float)
+    p = p.reshape(-1)
+    top = int(np.argmax(p))
+    total = float(p.sum())
+    if total <= 0:
+        return None, top, top
+    exp_rank = float((p * np.arange(p.size)).sum() / total)
+    if calibration is not None:
+        exp_rank = float(calibration.apply(exp_rank)[0])
+    idx = int(min(p.size - 1, max(0, np.floor(exp_rank + 0.5))))
+    return exp_rank, idx, top
+
 
 
 # ─── Training Workflow ────────────────────────────────────────────────────────
@@ -283,6 +313,9 @@ class InferenceWorkflow:
         )
         self.model.to(self.device)
         self.model.eval()
+        # Models were trained on v2 anchor labels; the artifact maps that scale
+        # onto the current one. Absent artifact -> raw posterior mean.
+        self.calibration = load_default_calibration()
 
     def rank_files(
         self,
@@ -341,14 +374,21 @@ class InferenceWorkflow:
         probs_b = out.get('rank_probs_b')
         probs_w = out.get('rank_probs_w')
 
+        b_exp, b_rank, b_top = rank_readout(probs_b, self.calibration)
+        w_exp, w_rank, w_top = rank_readout(probs_w, self.calibration)
+
         return RankResult(
             game_id      = sample['game_id'],
             b_rating     = out['b_rating'].item(),
             w_rating     = out['w_rating'].item(),
             b_rank_probs = probs_b.squeeze(0).cpu() if probs_b is not None else None,
             w_rank_probs = probs_w.squeeze(0).cpu() if probs_w is not None else None,
-            b_rank_top   = int(probs_b.argmax(-1)) if probs_b is not None else -1,
-            w_rank_top   = int(probs_w.argmax(-1)) if probs_w is not None else -1,
+            b_rank_top   = b_top,
+            w_rank_top   = w_top,
+            b_rank       = b_rank,
+            w_rank       = w_rank,
+            b_rank_exp   = b_exp,
+            w_rank_exp   = w_exp,
         )
 
 
@@ -359,6 +399,11 @@ class InferenceWorkflow:
 
 def result_to_output(r: RankResult) -> KAB2Output:
     """Convert an InferenceWorkflow RankResult into a KAB2Output.
+
+    b_rank/w_rank are the calibrated posterior mean, rounded (see
+    rank_readout); the argmax stays in RankResult as b_rank_top/w_rank_top and
+    is only a fallback when no calibration was applied. b_rank_exp /
+    w_rank_exp carry the continuous value so consumers do not re-derive it.
 
     Confidence = max rank-class probability (model's certainty about the
     predicted rank), 0.0 when the model produced no rank distribution.
@@ -371,8 +416,10 @@ def result_to_output(r: RankResult) -> KAB2Output:
         metadata     = {'source': 'model'},
         b_rating     = r['b_rating'],
         w_rating     = r['w_rating'],
-        b_rank       = r['b_rank_top'],
-        w_rank       = r['w_rank_top'],
+        b_rank       = r['b_rank'] if r['b_rank'] >= 0 else r['b_rank_top'],
+        w_rank       = r['w_rank'] if r['w_rank'] >= 0 else r['w_rank_top'],
+        b_rank_exp   = r.get('b_rank_exp'),
+        w_rank_exp   = r.get('w_rank_exp'),
         b_confidence = _conf(r['b_rank_probs']),
         w_confidence = _conf(r['w_rank_probs']),
         b_rank_probs = r['b_rank_probs'].tolist() if r['b_rank_probs'] is not None else None,

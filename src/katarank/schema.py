@@ -178,8 +178,10 @@ class KAB2Output(TypedDict):
 
     b_rating:   float
     w_rating:   float
-    b_rank:     int           # 0=20k … 28=9d
+    b_rank:     int           # 0=20k … 28=9d, calibrated posterior mean rounded
     w_rank:     int
+    b_rank_exp: NotRequired[Optional[float]]  # calibrated posterior mean (v3 anchor scale)
+    w_rank_exp: NotRequired[Optional[float]]
     b_confidence: float       # reliability (game quality, move count, ...)
     w_confidence: float
 

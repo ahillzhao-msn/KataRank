@@ -115,6 +115,8 @@ if _FASTAPI_AVAILABLE:
         w_rating:     float
         b_rank:       int                      # 0=20k … 28=9d, -1 unknown
         w_rank:       int
+        b_rank_exp:   Optional[float] = None   # calibrated posterior mean (v3 anchor scale)
+        w_rank_exp:   Optional[float] = None
         b_confidence: float
         w_confidence: float
         b_rank_probs: Optional[List[float]] = None   # 29-dim distribution
