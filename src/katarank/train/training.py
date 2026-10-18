@@ -314,6 +314,7 @@ def main():
         min_moves_per_player = tc.get('min_moves', 5),
         stratified  = tc.get('stratified', False),
         n_bands     = tc.get('n_bands', 5),
+        anchor_calibration = tc.get('anchor_calibration', 'default'),
     )
     val_loader, val_ds = make_kab2_loader(
         data_dir    = tc['data_dir'],
@@ -324,6 +325,7 @@ def main():
         num_workers = tc.get('num_workers', 0),
         max_moves_per_player = tc.get('max_moves', 400),
         min_moves_per_player = tc.get('min_moves', 5),
+        anchor_calibration = tc.get('anchor_calibration', 'default'),
     )
 
     # Training requires HumanSL rank anchors: the data must have been
@@ -415,6 +417,7 @@ def main():
             'train_rank_labeled': labeled,
             'val_rank_labeled':   val_labeled,
             'input_dim':          train_ds.input_dim,
+            'anchor_calibration': train_ds.anchor_calibration_info(),
         },
         epochs_trained   = result['epochs_trained'],
         early_stopped    = trainer.early_stopped,
