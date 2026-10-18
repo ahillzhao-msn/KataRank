@@ -29,10 +29,19 @@ Two baseline checkpoints are included in the repository:
 |-------|-----------|-------|--------|-------------|-------------|----------|
 | **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.0% | 0.9937 | Best accuracy (requires KataGo trunk vectors) |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 57.2% | 0.9780 | Fast inference (scalar features only, no trunk) |
+| **Mobile** | `nets/katarank_mobile/best_lite.pt` | 10-dim (katamobile b6c96) | 540K | 42.4% | 0.7983 | On-device in katamobile; features come from the app's own b6c96 network |
 
 Both models predict Go player rank (20k–9d, 29 classes) from game records. The Lite model was distilled from the Full model and needs only 10 scalar features per move.
 `rank_acc_pm1` is the share of validation players whose predicted rank is within ±1 of the label
-(rank MAE: Full 1.26, Lite 1.73).
+(rank MAE: Full 1.26, Lite 1.73, Mobile 2.48).
+
+The Mobile model is distilled from Full like Lite, but reads the 10 scalar features computed by
+katamobile's b6c96 SFT v3 network (`scripts/generate_kab2_katamobile.py`, then
+`python -m katarank.train.distill --student-data-dir ...`), so it can run on the phone. Its lower
+accuracy is a feature ceiling: a ridge baseline reaches 53.2% on b18 features but 36.8% on b6c96
+features, because b6c96's policy separates human strength much less sharply. Note that b6c96 SFT
+was fine-tuned on the same games, including 97% of the validation split, so the Mobile number may
+be slightly optimistic.
 
 > **Retrained on corrected data (2026-10-16).** Both checkpoints were trained on KAB2 with real
 > trunk vectors and HumanSL anchor v2 labels. The earlier checkpoints (±1 accuracy 96.4% / 94.8%)

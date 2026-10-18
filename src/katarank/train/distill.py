@@ -163,11 +163,15 @@ def generate_teacher_targets(
 ) -> Dict[str, torch.Tensor]:
     """Run teacher inference on all games, return soft targets.
 
-    Returns dict of tensors indexed by dataset position:
+    Returns dict of tensors, one row per game the collate kept (games with too
+    few moves are dropped), plus ``index``: game id -> row. Rows are looked up by
+    game id, never by dataset position, so a dropped game cannot shift the rest
+    and the student may read a different cache holding a subset of the games.
         teacher_b_rating:     (N,)
         teacher_w_rating:     (N,)
         teacher_rank_probs_b: (N, 29)
         teacher_rank_probs_w: (N, 29)
+        index:                {game_id: row}
     """
     teacher = teacher.to(device).eval()
     loader = DataLoader(
@@ -175,7 +179,7 @@ def generate_teacher_targets(
         collate_fn=kab2_collate, num_workers=0,
     )
 
-    all_br, all_wr, all_rpb, all_rpw = [], [], [], []
+    all_br, all_wr, all_rpb, all_rpw, ids = [], [], [], [], []
 
     for batch in loader:
         if not batch['xlens']:
@@ -186,8 +190,10 @@ def generate_teacher_targets(
         all_wr.append(out['w_rating'].cpu())
         all_rpb.append(out['rank_probs_b'].cpu())
         all_rpw.append(out['rank_probs_w'].cpu())
+        ids.extend(batch['game_ids'])
 
     return {
+        'index': {gid: i for i, gid in enumerate(ids)},
         'teacher_b_rating': torch.cat(all_br),
         'teacher_w_rating': torch.cat(all_wr),
         'teacher_rank_probs_b': torch.cat(all_rpb),
@@ -202,7 +208,8 @@ class DistillationDataset(Dataset):
 
     Each item returns the same KAB2Sample but with:
     - x sliced to first ``student_dim`` columns (10-dim scalar features)
-    - teacher soft targets attached
+    - teacher soft targets attached, looked up by game id; a game the teacher
+      has no target for comes back empty and is dropped by distill_collate
     """
 
     def __init__(
@@ -228,17 +235,20 @@ class DistillationDataset(Dataset):
 
     def __getitem__(self, idx: int):
         sample = self.base[idx]
+        row = self.targets['index'].get(sample['game_id'])
         # Slice move features to student_dim (first 10 scalar cols)
-        if sample['seq_len'] > 0:
+        if sample['seq_len'] > 0 and row is not None:
             sample['x'] = sample['x'][:, :self.student_dim]
         else:
             sample['x'] = torch.zeros(0, self.student_dim)
+            sample['seq_len'] = 0
+            row = 0  # placeholder; the empty sample is dropped by distill_collate
 
         # Attach teacher targets
-        sample['teacher_b_rating'] = self.targets['teacher_b_rating'][idx]
-        sample['teacher_w_rating'] = self.targets['teacher_w_rating'][idx]
-        sample['teacher_rank_probs_b'] = self.targets['teacher_rank_probs_b'][idx]
-        sample['teacher_rank_probs_w'] = self.targets['teacher_rank_probs_w'][idx]
+        sample['teacher_b_rating'] = self.targets['teacher_b_rating'][row]
+        sample['teacher_w_rating'] = self.targets['teacher_w_rating'][row]
+        sample['teacher_rank_probs_b'] = self.targets['teacher_rank_probs_b'][row]
+        sample['teacher_rank_probs_w'] = self.targets['teacher_rank_probs_w'][row]
         return sample
 
 
@@ -447,7 +457,11 @@ def main():
     parser.add_argument('--teacher', default='nets/katarank/best.pt',
                         help='Path to teacher checkpoint')
     parser.add_argument('--data-dir', required=True,
-                        help='KAB2 cache directory')
+                        help='KAB2 cache directory (teacher input)')
+    parser.add_argument('--student-data-dir',
+                        help='KAB2 cache with the student\'s own features, keyed by the same game '
+                        'ids (e.g. katamobile features from scripts/generate_kab2_katamobile.py). '
+                        'Default: the student reads the first 10 columns of --data-dir')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--lr', type=float, default=5e-4)
@@ -483,6 +497,20 @@ def main():
     val_ds = KAB2Dataset(args.data_dir, split='V', max_moves_per_player=400,
                          min_moves_per_player=5)
 
+    student_dir = args.student_data_dir or args.data_dir
+    if args.student_data_dir:
+        student_train_ds = KAB2Dataset(student_dir, split='T', max_moves_per_player=400,
+                                       min_moves_per_player=5)
+        student_val_ds = KAB2Dataset(student_dir, split='V', max_moves_per_player=400,
+                                     min_moves_per_player=5)
+    else:
+        student_train_ds, student_val_ds = train_ds, val_ds
+    feature_net_file = os.path.join(student_dir, '_feature_net.txt')
+    feature_net = None
+    if os.path.exists(feature_net_file):
+        with open(feature_net_file, encoding='utf-8') as f:
+            feature_net = f.read().strip()
+
     # ── Generate teacher soft targets ────────────────────────────────────
     device = args.device
     if device == 'auto':
@@ -496,8 +524,8 @@ def main():
 
     # ── Wrap in distillation datasets ────────────────────────────────────
     student_dim = 10
-    dist_train = DistillationDataset(train_ds, train_targets, student_dim)
-    dist_val = DistillationDataset(val_ds, val_targets, student_dim)
+    dist_train = DistillationDataset(student_train_ds, train_targets, student_dim)
+    dist_val = DistillationDataset(student_val_ds, val_targets, student_dim)
 
     train_sampler = StratifiedRankSampler(dist_train, batch_size=args.batch_size)
     train_loader = DataLoader(dist_train, batch_size=args.batch_size,
@@ -570,7 +598,7 @@ def main():
     print("\nComputing validation metrics...")
     from katarank.train.training import evaluate_metrics
     # Need a standard loader (not distillation) for evaluation
-    eval_ds = KAB2Dataset(args.data_dir, split='V', max_moves_per_player=400,
+    eval_ds = KAB2Dataset(student_dir, split='V', max_moves_per_player=400,
                           min_moves_per_player=5)
     # Slice eval data to student_dim
     class SlicedDataset(Dataset):
@@ -602,9 +630,11 @@ def main():
         model_config=student.get_config(),
         training_config=config,
         data={
-            'train_games': len(train_ds.games),
-            'val_games': len(val_ds.games),
+            'train_games': len(student_train_ds.games),
+            'val_games': len(student_val_ds.games),
             'input_dim': student_dim,
+            'student_data_dir': student_dir,
+            'feature_net': feature_net,
             'teacher': args.teacher,
             'teacher_input_dim': teacher_cfg['input_dim'],
             'temperature': args.temperature,

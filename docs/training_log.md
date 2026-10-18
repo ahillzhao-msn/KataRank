@@ -375,6 +375,7 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 - [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%) — 指标作废，见 2.4
 - [x] Lite 模型部署 — engine_mode=lite 为线上默认推理模式
 - [x] 全量重训（2026-10-16）— 新 KAB2（真实 trunk + 锚点 v2）上从头训练 Full（±1 70.0%），再蒸馏 Lite（±1 57.2%）；见 2.5
+- [x] 移动端学生（2026-10-17）— 以 Full 为教师、katamobile b6c96 SFT v3 产出的 10 维特征为输入蒸馏（`nets/katarank_mobile`，±1 42.4%、MAE 2.48、相关 0.80，61 epoch 早停）。上限在特征：同一岭回归基线在 b18 特征上 53.2%、b6c96 特征上 36.8%。按已见手数：每方 30 手相关 0.55、50 手 0.68、整盘 0.80。b6c96 SFT 训练集含验证集 97% 的棋局，指标可能略偏乐观；下次重训 SFT 应按棋局留出本验证集
 
 ### 下一步
 - **trunk A/B** — 同一份数据上对比真实 trunk 与清零 trunk，确认 Full 相对 Lite 的价值
