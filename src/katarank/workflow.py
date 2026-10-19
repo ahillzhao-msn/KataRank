@@ -103,6 +103,16 @@ class RankResult(TypedDict):
     w_rank_exp:   Optional[float]
 
 
+def output_calibration(model, calibration):
+    """The calibration to apply to ``model``'s rank output: None when the model's
+    training labels are already on the calibration's target scale."""
+    if calibration is None:
+        return None
+    if getattr(model, 'rank_label_anchor', None) == calibration.target_anchor:
+        return None
+    return calibration
+
+
 def rank_readout(probs, calibration=None):
     """(expected rank, rounded index, argmax index) from a 29-class posterior.
 
@@ -313,9 +323,11 @@ class InferenceWorkflow:
         )
         self.model.to(self.device)
         self.model.eval()
-        # Models were trained on v2 anchor labels; the artifact maps that scale
-        # onto the current one. Absent artifact -> raw posterior mean.
-        self.calibration = load_default_calibration()
+        # The artifact maps the source anchor's scale onto the target's. A model trained
+        # on labels already on the target scale (rank_label_anchor) needs no mapping;
+        # applying it again would shift the output twice. Checkpoints that predate the
+        # field were trained on v2 labels. Absent artifact -> raw posterior mean.
+        self.calibration = output_calibration(model, load_default_calibration())
 
     def rank_files(
         self,

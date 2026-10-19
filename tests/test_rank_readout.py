@@ -47,3 +47,22 @@ def test_result_to_output_prefers_the_calibrated_rank():
     assert out['b_rank'] == 15
     assert abs(out['b_rank_exp'] - 15.3408) < 1e-4
     assert out['w_rank'] == -1
+
+
+def test_output_calibration_depends_on_the_models_label_scale(tmp_path):
+    from katarank.model import KataRankModel
+    from katarank.workflow import output_calibration
+
+    cal = load_default_calibration()
+    model = KataRankModel(input_dim=10, hidden_dim=16, num_heads=2, num_inducing=4)
+    assert model.rank_label_anchor is None
+    assert output_calibration(model, cal) is cal            # pre-field checkpoint: v2 labels
+    model.rank_label_anchor = cal.source_anchor
+    assert output_calibration(model, cal) is cal
+    model.rank_label_anchor = cal.target_anchor
+    assert output_calibration(model, cal) is None           # already on the v3 scale
+    assert output_calibration(model, None) is None
+
+    p = tmp_path / 'm.pt'
+    model.save(str(p))
+    assert KataRankModel.load(str(p)).rank_label_anchor == cal.target_anchor

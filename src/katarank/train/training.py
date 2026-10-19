@@ -351,6 +351,12 @@ def main():
         dropout      = mc.get('dropout', 0.1),
         n_rank_classes = mc.get('num_rank_classes', 29),
     )
+    model.rank_label_anchor = train_ds.label_anchor
+    print(f"  Rank labels on anchor scale: {model.rank_label_anchor} "
+          f"{dict(train_ds.label_anchor_counts)}")
+    if model.rank_label_anchor is None:
+        print("  WARNING: rank labels mix anchor scales — inference will treat this model "
+              "as trained on the calibration's source scale")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"  Input dim:  {train_ds.input_dim}")
 
@@ -364,8 +370,8 @@ def main():
     resume_optimizer_path = None
     if args.resume:
         ckpt = KataRankModel.load(args.resume)
-        model.load_state_dict(ckpt.state_dict())
-        print(f"Resumed from {args.resume}")
+        model.load_state_dict(ckpt.state_dict())   # rank_label_anchor stays this run's
+        print(f"Resumed from {args.resume} (its labels: anchor {ckpt.rank_label_anchor})")
         # Companion file saved next to any checkpoint by Trainer.
         # save_optimizer_state — carries this same continuation forward
         # whether --resume points at last run's own candidate or all the
@@ -418,6 +424,7 @@ def main():
             'val_rank_labeled':   val_labeled,
             'input_dim':          train_ds.input_dim,
             'anchor_calibration': train_ds.anchor_calibration_info(),
+            'rank_label_anchor':  model.rank_label_anchor,
         },
         epochs_trained   = result['epochs_trained'],
         early_stopped    = trainer.early_stopped,

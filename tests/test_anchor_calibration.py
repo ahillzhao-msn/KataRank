@@ -106,7 +106,10 @@ def test_dataset_applies_calibration(tmp_path, monkeypatch):
     assert ds.calibrated_labels == 3
     info = ds.anchor_calibration_info()
     assert info['source_anchor'] == 2 and info['calibrated_labels'] == 3 and len(info['sha256']) == 64
+    # every label ends up on the v3 scale: 3 calibrated v2 labels + 2 native v3 labels
+    assert dict(ds.label_anchor_counts) == {3: 5} and ds.label_anchor == 3
 
     raw = KAB2Dataset(str(tmp_path), split='T', anchor_calibration=None)
     assert {g['id']: g['rank_b'] for g in raw.games} == {'g2': 14, 'g3': 14, 'g4': 14}
     assert raw.anchor_calibration_info() is None
+    assert dict(raw.label_anchor_counts) == {2: 3, 3: 2} and raw.label_anchor is None
