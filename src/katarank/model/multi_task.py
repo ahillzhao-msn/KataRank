@@ -159,6 +159,12 @@ class KataRankModel(nn.Module):
         self.rank_head_b = OrdinalLogisticHead(head_dim, n_rank_classes)
         self.rank_head_w = OrdinalLogisticHead(head_dim, n_rank_classes)
 
+        # humanAnchorVer scale of the rank labels this model was trained on; None for
+        # checkpoints saved before it was recorded (trained on v2 or earlier labels).
+        # Inference applies the anchor calibration to the output only when it is not
+        # already on the calibration's target scale.
+        self.rank_label_anchor: Optional[int] = None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -196,6 +202,7 @@ class KataRankModel(nn.Module):
             'type':        'KataRankModel',
             'config':      self._cfg,
             'model_state': self.state_dict(),
+            'rank_label_anchor': self.rank_label_anchor,
         }, path)
 
     @staticmethod
@@ -205,6 +212,7 @@ class KataRankModel(nn.Module):
             f"Expected KataRankModel, got {data.get('type')}"
         model = KataRankModel(**data['config'])
         model.load_state_dict(data['model_state'])
+        model.rank_label_anchor = data.get('rank_label_anchor')
         return model.to(device)
 
     def get_config(self) -> dict:

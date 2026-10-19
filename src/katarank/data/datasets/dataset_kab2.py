@@ -11,6 +11,7 @@ Inherits from BaseKAB2Dataset — each item is a KAB2Sample.
 """
 
 import csv
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -94,6 +95,8 @@ class KAB2Dataset(BaseKAB2Dataset):
         self.anchor_calibration = (AnchorCalibration.load(self.anchor_calibration_path)
                                    if self.anchor_calibration_path else None)
         self.calibrated_labels = 0   # player labels remapped by anchor_calibration
+        # humanAnchorVer scale of each training label after calibration → count
+        self.label_anchor_counts: Counter = Counter()
 
         meta_path = meta_csv or str(self.data_dir / '_meta.csv')
         self.games = self._load_meta(meta_path, split)
@@ -121,6 +124,13 @@ class KAB2Dataset(BaseKAB2Dataset):
         }
 
     @property
+    def label_anchor(self) -> Optional[int]:
+        """The anchor scale every rank label is on, or None when they are mixed or absent.
+        Saved with a trained model so inference knows whether its output still needs the
+        calibration (see KataRankModel.rank_label_anchor)."""
+        return next(iter(self.label_anchor_counts)) if len(self.label_anchor_counts) == 1 else None
+
+    @property
     def input_dim(self) -> int:
         return self._input_dim
 
@@ -145,10 +155,12 @@ class KAB2Dataset(BaseKAB2Dataset):
                 rank_b_idx = rank_str_to_idx(row.get('B_humanRank', ''))
                 rank_w_idx = rank_str_to_idx(row.get('W_humanRank', ''))
 
+                anchor = int(round(self._float_or(row.get('humanAnchorVer'))))
+                anchor_b = anchor_w = anchor
                 if rank_b_idx >= 0:
-                    rank_b_idx = self._calibrated(row, 'B', rank_b_idx)
+                    rank_b_idx, anchor_b = self._calibrated(row, 'B', rank_b_idx, anchor)
                 if rank_w_idx >= 0:
-                    rank_w_idx = self._calibrated(row, 'W', rank_w_idx)
+                    rank_w_idx, anchor_w = self._calibrated(row, 'W', rank_w_idx, anchor)
 
                 b_hlp = self._float_or(row.get('B_humanLogPrior'))
                 w_hlp = self._float_or(row.get('W_humanLogPrior'))
@@ -156,6 +168,10 @@ class KAB2Dataset(BaseKAB2Dataset):
                     rank_b_idx = -1
                 if w_hlp == 0.0:
                     rank_w_idx = -1
+                if rank_b_idx >= 0:
+                    self.label_anchor_counts[anchor_b] += 1
+                if rank_w_idx >= 0:
+                    self.label_anchor_counts[anchor_w] += 1
 
                 games.append({
                     'id':          row['file'].strip(),
@@ -168,12 +184,13 @@ class KAB2Dataset(BaseKAB2Dataset):
                 })
         return games
 
-    def _calibrated(self, row: Dict, side: str, raw_idx: int) -> int:
+    def _calibrated(self, row: Dict, side: str, raw_idx: int, anchor: int) -> Tuple[int, int]:
+        """(training label, anchor scale it is on) for one labelled side."""
         idx = effective_rank_idx(row, side, self.anchor_calibration)
         if idx is None:
-            return raw_idx
+            return raw_idx, anchor
         self.calibrated_labels += 1
-        return idx
+        return idx, self.anchor_calibration.target_anchor
 
     def _game_path(self, game_id: str) -> Path:
         return self.data_dir / f"{game_id}.npz"
