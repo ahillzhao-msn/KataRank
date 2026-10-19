@@ -35,6 +35,23 @@ likelihood curve. Measured on 600 players (300 random V-set games), katago-fork 
 - Override per run with `anchor_calibration:` in the training config (a path, or `null` to
   train on the raw labels).
 
+## At inference
+
+A checkpoint records the anchor scale of the labels it was trained on: `rank_label_anchor`,
+taken from `KAB2Dataset.label_anchor` (after calibration). `workflow.output_calibration()`
+skips the output map for a model whose `rank_label_anchor` equals the artifact's
+`target_anchor`. Otherwise it maps the posterior mean from v2 onto v3, so both kinds of model
+report on the same scale. `None` (any checkpoint saved before this field) counts as v2.
+
+| Checkpoint | Labels | Output map at inference |
+|---|---|---|
+| Full `v20261019_050322` (live since 2026-10-19) | calibrated, `rank_label_anchor = 3` | none |
+| Lite, mobile (distilled 2026-10-16/17) | v2, `None` | v2 → v3 |
+
+Downstream, GOPredict stores KataRank's `b_rank_exp`/`w_rank_exp` as is. Its vendored copy of
+the map is only a fallback for verdicts without that field, so it must not be applied to a
+v3-scale model's `rank_probs`.
+
 ## Refitting
 
 The truth labels come from batch_analysis runs of the current anchor over cached games:

@@ -65,8 +65,8 @@ move_vec (1, input_dim)  where input_dim = 10 + 2 × trunkCh
 | 字段 | 类型 | 范围 | 用途 |
 |---|---|---|---|
 | `meanLogPrior` | float | -5.9（20k）~ -0.5（9d） | 主任务：强度回归目标 |
-| `humanRankIdx` | float→int | 0-28 或 -1（未启用） | 辅任务：段位分类目标（锚点 v2 的后验均值取整） |
-| `humanRankExp` / `humanRankSd` | float | 0-28 / 档 | 锚点 v2 的连续后验均值与标准差（summary[12]/[13]，`humanAnchorVer`≥2 时有效） |
+| `humanRankIdx` | float→int | 0-28 或 -1（未启用） | 辅任务：段位分类目标（锚点后验均值取整；v2 标签加载时校正到 v3 刻度） |
+| `humanRankExp` / `humanRankSd` | float | 0-28 / 档 | 锚点的连续后验均值与标准差（summary[12]/[13]，`humanAnchorVer`≥2 时有效） |
 | `humanLogPrior` | float | < 0 | 段位标签置信度权重 |
 
 ---
@@ -261,7 +261,7 @@ z   = self.fusion(cat([z_b, z_w]))  # Linear(6*hidden_dim → hidden_dim)
 | 信号 | 来源 | 阶段 | 作用 |
 |---|---|---|---|
 | `meanLogPrior` | KataGo policy | 训练 + 推理 | 主任务回归目标；KataGo 视角的客观棋力 |
-| `humanRankIdx` | HumanSL 锚点 v2（见 §6.6） | **仅训练** | 锚定 OrdinalHead 的 threshold 到有意义段位边界 |
+| `humanRankIdx` | HumanSL 锚点 v3（见 §6.6） | **仅训练** | 锚定 OrdinalHead 的 threshold 到有意义段位边界 |
 | `humanLogPrior` | HumanSL log-likelihood | **仅训练** | 段位标签的置信度权重 |
 
 ### 6.3 OrdinalHead 的 threshold 锚定机制
@@ -317,16 +317,24 @@ z (hidden_dim) → Linear(hidden_dim → hidden_dim//2) → ReLU → Dropout
 
 ### 6.6 HumanSL 锚点：怎么得到 humanRankIdx
 
-`batch_analysis`（KataGo fork）对每位棋手、每盘棋执行同一套固定流程（锚点 v2，KataGo#2）：
+`batch_analysis`（KataGo fork）对每位棋手、每盘棋执行同一套固定流程（锚点 v3，KataGo#4）：
 
 1. **主模型守门**：只保留该棋手本盘「主模型目差损失」处于 10%–90% 分位的着法参与投票，
    排除极好与极坏的离群手；
-2. 计算这些着法在 5 个固定 HumanSL 档位（20k、13k、6k、2d、9d）下的总对数似然；
-3. 自然三次样条插值到全部 29 档，得到平坦先验下的后验分布；
-4. 标签 = 后验均值（`humanRankExp`，取整即 `humanRankIdx`），后验标准差为 `humanRankSd`。
+2. **粗筛**：计算这些着法在 7 个固定 HumanSL 档位（20k、15k、10k、5k、1d、6d、9d）下的总对数似然；
+3. **精扫**：样条插值得到粗筛后验均值 c，再补测 round(c) ±2 内粗筛未测的档位；
+4. 用全部已测档位做自然三次样条插值到 29 档，得到平坦先验下的后验分布；
+5. 标签 = 后验均值（`humanRankExp`，取整即 `humanRankIdx`），后验标准差为 `humanRankSd`。
 
 设计取向是**客观、稳定、可复现**而非追求「真实段位」：每盘棋使用完全相同的方法和标尺。
-80 盘 / 160 名棋手上，折半信度与「全部着法 × 29 档全扫」相同（r 0.78 vs 0.78），算力约 14%。
+与同一批着法的 29 档全扫对比（300 盘 / 600 名棋手）：平均 |误差| 0.02 档、最大 0.59、取整一致 98%，
+算力约为全扫的 38%。
+
+> **v2（KataGo#2，2026-10 至 v3 之前）**：只测 5 个固定档位（20k、13k、6k、2d、9d），不精扫。
+> 折半信度与全扫接近（r 0.78 vs 0.78），但有系统偏差：对全扫平均 |误差| 0.65、取整一致 46%，
+> 8k–5k 偏低约 1.25 档——档距 7 档时样条跟不上似然曲线。稳定不等于无偏。缓存里的 v2 标签
+> 不重跑 HumanSL，而是在加载时经 `nets/anchor_calibration/v2_to_v3.json` 映射到 v3 刻度，
+> 见 `docs/anchor_calibration.md`。
 
 > **更正（2026-10）**：此前本节写道 `humanRankIdx ≈ (meanLogPrior + 5.9) / 5.4 × 28`，
 > 并称两个信号「共轭」。那是旧锚点的假象：旧实现只在该公式算出的中心档附近测 3 档并取 argmax，
@@ -366,7 +374,7 @@ def rank_loss(rank_probs, rank_target, human_log_prior):
 ```
 b_rating  → 连续强度值（归一化，可反归一化到 meanLogPrior 尺度）
 w_rating  → 同上
-rank_probs_B (29,)  → 段位概率分布（argmax → 段位标签）
+rank_probs_B (29,)  → 段位概率分布（后验均值取整 → 段位标签；argmax 会在相邻档间留空档）
 rank_probs_W (29,)
 ```
 

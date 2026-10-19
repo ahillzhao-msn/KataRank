@@ -42,9 +42,10 @@ A self-contained module (~900 lines) that:
   collects scalars(10) + pick(C) + avgTrunk(C) features (KAB2 format)
 - The NN cache is disabled: every position is evaluated once, and NNEvaluator would
   otherwise retain every trunk-carrying result (~0.74 MB each)
-- Optional HumanSL pass (`-human-model`): the rank anchor v2 — per player, moves whose
+- Optional HumanSL pass (`-human-model`): the rank anchor v3 — per player, moves whose
   main-model point loss is in that player's 10–90% band vote; HumanSL log-likelihood under
-  5 fixed profiles (20k, 13k, 6k, 2d, 9d) → natural spline → posterior over 29 profiles →
+  7 coarse profiles (20k, 15k, 10k, 5k, 1d, 6d, 9d), then the skipped profiles within ±2 of
+  the coarse estimate → natural spline → posterior over 29 profiles →
   `humanRankExp`/`humanRankSd` (summary[12]/[13]), rounded into `humanRankIdx` (summary[10])
 - File mode: one combined compressed `<stem>.npz` per game + `_meta.csv`
 - Stream mode (`-stream`): per-player frames on stdout tagged with the

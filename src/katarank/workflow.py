@@ -119,8 +119,9 @@ def rank_readout(probs, calibration=None):
     The rank head is ordinal: its argmax is the peak of a scalar threshold
     model, not an estimate — the peak histogram has holes between adjacent
     classes even though the labels are dense. The posterior mean is continuous
-    and is the squared-error-optimal point estimate; the calibration maps it
-    from the model's v2 anchor scale onto the v3 scale the labels use now.
+    and is the squared-error-optimal point estimate. `calibration` maps it
+    from the v2 anchor scale onto v3; output_calibration() passes None for a
+    model whose labels were already on the v3 scale (rank_label_anchor == 3).
     """
     if probs is None:
         return None, -1, -1
@@ -412,9 +413,9 @@ class InferenceWorkflow:
 def result_to_output(r: RankResult) -> KAB2Output:
     """Convert an InferenceWorkflow RankResult into a KAB2Output.
 
-    b_rank/w_rank are the calibrated posterior mean, rounded (see
+    b_rank/w_rank are the posterior mean on the v3 anchor scale, rounded (see
     rank_readout); the argmax stays in RankResult as b_rank_top/w_rank_top and
-    is only a fallback when no calibration was applied. b_rank_exp /
+    is only a fallback when there is no posterior to read. b_rank_exp /
     w_rank_exp carry the continuous value so consumers do not re-derive it.
 
     Confidence = max rank-class probability (model's certainty about the

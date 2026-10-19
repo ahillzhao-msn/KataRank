@@ -20,10 +20,11 @@ PlayerSummary notable indices
     [2]  meanLogPrior      — primary training target
     [10] humanRankIdx      — HumanSL anchor, rounded 0..28 (20k..9d), -1 if not computed
     [11] humanLogPrior     — mean HumanSL log-likelihood at the best evaluated profile
-    [12] humanRankExp      — anchor v2: continuous posterior-mean rank (0..28)
-    [13] humanRankSd       — anchor v2: posterior sd (ranks)
-    [14] humanProfiles     — anchor v2: number of HumanSL profiles evaluated
-    [15] humanAnchorVer    — anchor method version (2 = loss-gated 5-profile; 0 = legacy window)
+    [12] humanRankExp      — anchor >= v2: continuous posterior-mean rank (0..28)
+    [13] humanRankSd       — anchor >= v2: posterior sd (ranks)
+    [14] humanProfiles     — anchor >= v2: number of HumanSL profiles evaluated
+    [15] humanAnchorVer    — anchor method version (3 = 7 coarse + ±2 refine;
+                             2 = 5 fixed profiles; 0 = legacy window)
 
 Scalar layout per move (10 fields)
     [0] whiteWinProb
@@ -157,7 +158,7 @@ def parse_kab2_buffer(raw: bytes) -> Tuple[np.ndarray, Dict]:
         'human_rank_idx':   human_rank,
         'human_log_prior':  float(summary[KAB2_SUM_HUMAN_LP]),
         'human_anchor_ver': anchor_ver,
-        # Anchor v2 fields; None for files written by the legacy 3-profile window.
+        # Anchor >= v2 fields; None for files written by the legacy 3-profile window.
         'human_rank_exp':   float(summary[KAB2_SUM_HUMAN_EXP]) if anchor_ver >= 2 else None,
         'human_rank_sd':    float(summary[KAB2_SUM_HUMAN_SD]) if anchor_ver >= 2 else None,
     }
