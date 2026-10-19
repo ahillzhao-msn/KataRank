@@ -40,7 +40,7 @@ The custom KataGo binary emits per-player feature frames in two delivery modes:
 - **Stream mode** (pipe): `[1B side B/W][4B idLen][game_id][4B size][KAB2 payload]`, terminated by `0x00`. Used for live inference.
 - **File mode** (disk): `[4B B_size][B payload][4B W_size][W payload]` packed into `.npz` files. Used for training datasets.
 
-Each KAB2 payload is a binary struct with a 96-byte header (magic `KAB2`, dims, 16×float32 `PlayerSummary`) followed by `numMoves × moveDim` float32 move features. Key `PlayerSummary` indices: `[2]` = `meanLogPrior` (primary training target), `[10]` = `humanRankIdx` (HumanSL anchor rounded, 0–28 for 20k–9d, –1 if absent), `[11]` = `humanLogPrior`, `[12..15]` = anchor v2 `humanRankExp` / `humanRankSd` / `humanProfiles` / `humanAnchorVer`. The single KAB2 codec (parse + build) is `data/preprocess.py`; `engine.py` re-exports `parse_kab2_buffer` / `build_kab2_payload`.
+Each KAB2 payload is a binary struct with a 96-byte header (magic `KAB2`, dims, 16×float32 `PlayerSummary`) followed by `numMoves × moveDim` float32 move features. Key `PlayerSummary` indices: `[2]` = `meanLogPrior` (primary training target), `[10]` = `humanRankIdx` (HumanSL anchor rounded, 0–28 for 20k–9d, –1 if absent), `[11]` = `humanLogPrior`, `[12..15]` = anchor `humanRankExp` / `humanRankSd` / `humanProfiles` / `humanAnchorVer` (3 = current, 2 = older 5-profile anchor, calibrated at load time — `docs/anchor_calibration.md`). The single KAB2 codec (parse + build) is `data/preprocess.py`; `engine.py` re-exports `parse_kab2_buffer` / `build_kab2_payload`.
 
 ### Core modules
 
@@ -59,10 +59,10 @@ Two baseline models are checked into the repo:
 
 | Model | Path | Input | Params | rank_acc_pm1 | rating_corr |
 |-------|------|-------|--------|-------------|-------------|
-| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.0% | 0.9937 |
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.7% | 0.9936 |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 57.2% | 0.9780 |
 
-Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were retrained on corrected KAB2 (real trunk + anchor v2 labels) on 2026-10-16 (training_log §2.5); the earlier ~95% figures came from all-zero trunk and formula-like labels and are void (§2.4).** Production training: the gated session GoPredict triggers (`POST /api/v1/models/train` → `/train/start` → `scripts/train_session.py`, which reuses `scripts/auto_train.py` steps 1–4 and promotes only a candidate that beats the live model) — `docs/training-guide.md` §3.2.
+Full model requires KataGo trunk vectors; Lite model uses only scalar features (distilled from Full). Training reports in `nets/*/training_report.json`. See `docs/training_log.md` for full experiment history. **These checkpoints were retrained on corrected KAB2 (real trunk + anchor v2 labels) on 2026-10-16 (training_log §2.5); Full was fine-tuned on v3-scale labels on 2026-10-19 (§2.6, checkpoint `rank_label_anchor=3`); the earlier ~95% figures came from all-zero trunk and formula-like labels and are void (§2.4).** Production training: the gated session GoPredict triggers (`POST /api/v1/models/train` → `/train/start` → `scripts/train_session.py`, which reuses `scripts/auto_train.py` steps 1–4 and promotes only a candidate that beats the live model) — `docs/training-guide.md` §3.2.
 
 ### Model (`src/katarank/model/`)
 

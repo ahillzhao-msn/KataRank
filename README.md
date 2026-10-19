@@ -27,7 +27,7 @@ Two baseline checkpoints are included in the repository:
 
 | Model | Checkpoint | Input | Params | rank_acc_pm1 | rating_corr | Use case |
 |-------|-----------|-------|--------|-------------|-------------|----------|
-| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.0% | 0.9937 | Best accuracy (requires KataGo trunk vectors) |
+| **Full** | `nets/katarank/best.pt` | 1034-dim | 2.26M | 70.7% | 0.9936 | Best accuracy (requires KataGo trunk vectors) |
 | **Lite** | `nets/katarank_lite/best_lite.pt` | 10-dim | 540K | 57.2% | 0.9780 | Fast inference (scalar features only, no trunk) |
 | **Mobile** | `nets/katarank_mobile/best_lite.pt` | 10-dim (katamobile b6c96) | 540K | 42.4% | 0.7983 | On-device in katamobile; features come from the app's own b6c96 network |
 
@@ -44,7 +44,9 @@ was fine-tuned on the same games, including 97% of the validation split, so the 
 be slightly optimistic.
 
 > **Retrained on corrected data (2026-10-16).** Both checkpoints were trained on KAB2 with real
-> trunk vectors and HumanSL anchor v2 labels. The earlier checkpoints (±1 accuracy 96.4% / 94.8%)
+> trunk vectors and HumanSL anchor v2 labels. Full was then fine-tuned (2026-10-19) on the same
+> cache with the labels mapped onto the v3 anchor scale (`docs/anchor_calibration.md`); Lite is
+> still the 2026-10-16 distillation on v2 labels, and its output is calibrated at inference. The earlier checkpoints (±1 accuracy 96.4% / 94.8%)
 > were trained on data with all-zero trunks and labels that were a formula of the input scalars, so
 > their numbers measured how well the model reproduced that formula; they are not comparable with
 > these. Full now leads Lite by 13 points, likely mostly from the trunk vectors (a trunk A/B test is
@@ -485,12 +487,12 @@ Key `PlayerSummary` fields:
 | 2 | `meanLogPrior` | Primary training target (log KataGo policy prior) |
 | 10 | `humanRankIdx` | HumanSL anchor rounded, 0–28 (20k–9d); –1 if HumanSL not computed |
 | 11 | `humanLogPrior` | Mean HumanSL log-likelihood at the best evaluated profile (confidence weight) |
-| 12 | `humanRankExp` | Anchor v2: continuous posterior-mean rank |
-| 13 | `humanRankSd` | Anchor v2: posterior sd (ranks) |
-| 14 | `humanProfiles` | Anchor v2: number of HumanSL profiles evaluated |
-| 15 | `humanAnchorVer` | Anchor method version (2 = loss-gated 5-profile; 0 = legacy) |
+| 12 | `humanRankExp` | Anchor ≥ v2: continuous posterior-mean rank |
+| 13 | `humanRankSd` | Anchor ≥ v2: posterior sd (ranks) |
+| 14 | `humanProfiles` | Anchor ≥ v2: number of HumanSL profiles evaluated (v3: at most 11) |
+| 15 | `humanAnchorVer` | Anchor method version (3 = 7 coarse profiles + ±2 refine; 2 = 5 fixed profiles; 0 = legacy) |
 
-The anchor method is described in `docs/MODEL_V3_ARCHITECTURE.md` §6.6. The parser and writer live in
+The anchor method is described in `docs/MODEL_V3_ARCHITECTURE.md` §6.6; older-version labels are mapped onto the current scale by `docs/anchor_calibration.md`. The parser and writer live in
 `katarank.data.preprocess`.
 
 ### Stream mode — per-player frames with game id

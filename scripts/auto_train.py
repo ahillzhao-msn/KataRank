@@ -180,7 +180,7 @@ _META_FIELDNAMES = [
     "B_complexity", "B_scoreVar", "B_drop", "B_humanRank", "B_humanLogPrior",
     "W_acc1", "W_acc3", "W_logPrior", "W_winRate", "W_scoreLead",
     "W_complexity", "W_scoreVar", "W_drop", "W_humanRank", "W_humanLogPrior",
-    # HumanSL anchor v2 (batch_analysis appends these; empty for legacy files)
+    # HumanSL anchor >= v2 (batch_analysis appends these; empty for legacy files)
     "B_humanRankExp", "B_humanRankSd", "W_humanRankExp", "W_humanRankSd", "humanAnchorVer",
 ]
 

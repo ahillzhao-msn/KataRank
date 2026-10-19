@@ -244,6 +244,37 @@ KataRank `/train/start` → `scripts/train_session.py --force --from-scratch`。
 段位判断难度。Full 比 Lite 高 13 个百分点（±1）；修复前两者几乎持平（trunk 全为 0），所以差距
 很可能主要来自 trunk 向量，但 Lite 的 hidden_dim 也更小，严格结论要等下文的 trunk A/B。
 
+### 2.6 v3 刻度标签上的微调 (2026-10-19)
+
+**问题。** GOPredict 概览页的段位分布在 12k/10k/9k/5k/4k 出现空档。原因有两个：
+1. 读数用 argmax。有序 logistic 头的各类概率由阈值间距决定，窄类永远不会是峰值；
+   改用后验均值后分布连续（GOPredict#11、KataRank#17）。
+2. 锚点 v2 有偏差。与 29 档全扫相比平均 |误差| 0.65，8k–5k 偏低约 1.25 档；
+   锚点 v3（7 档粗筛 + ±2 精扫，KataGo#4）把它降到 0.02。
+
+**做法。** 不重新生成 KAB2，也不重跑 HumanSL：用 2,600 名棋手的 v3 真值拟合 v2→v3 映射
+（`docs/anchor_calibration.md`），`KAB2Dataset` 加载时校正标签（KataRank#16，共重映射
+58,282 个标签）。然后走标准闸门会话（`POST /api/v1/models/train?force=true`，非 from_scratch），
+从线上 checkpoint 续训。checkpoint 记录 `rank_label_anchor = 3`，推理时就不再做输出校正
+（KataRank#18）。
+
+| | 新 Full `v20261019_050322` | 原 Full `v20261016_151743` |
+|---|---|---|
+| 轮数（最佳） | 22（17），早停 | — |
+| val_loss | **1.2169** | 1.2629 |
+| rank_mae | **1.20** | 1.33 |
+| rank_acc | **29.8%** | 26.9% |
+| rank_acc_pm1 | **70.7%** | 65.1% |
+| rating_corr | 0.9936 | 0.9937 |
+
+两列都在同一 V 集上、按 v3 刻度标签评估。原模型此前记录的 1.2297 / 70.0% 是按 v2 标签算的，
+不可直接比较。训练集 29,174 局、验证集 3,241 局，其中 33 局是新棋，由 v3 二进制直接标注。用时 3.75 h。
+之后 GOPredict 用新模型重评全库（64,830 条评分）：按取整后的期望段位统计，11k–9d 各档都有数据，
+峰值在 2k。
+
+Lite 和移动端学生仍是 v2 标签上蒸馏的 checkpoint（`rank_label_anchor` 为空），推理时经
+映射输出 v3 刻度。用新 Full 重新蒸馏可以去掉这层映射。
+
 ## 3. V2 Lite Model — 知识蒸馏
 
 ### 3.1 动机
@@ -375,9 +406,11 @@ Temperature T=2.0 控制 teacher 分布的软度。T>1 使分布更平滑，给 
 - [x] Phase 2 Lite: 全量蒸馏 (10-dim, rank_acc_pm1 94.8%) — 指标作废，见 2.4
 - [x] Lite 模型部署 — engine_mode=lite 为线上默认推理模式
 - [x] 全量重训（2026-10-16）— 新 KAB2（真实 trunk + 锚点 v2）上从头训练 Full（±1 70.0%），再蒸馏 Lite（±1 57.2%）；见 2.5
+- [x] v3 刻度微调（2026-10-19）— 锚点 v3 + 加载时 v2→v3 标签校正，Full 续训 22 轮（v3 标签下 ±1 70.7%，原模型 65.1%）；见 2.6
 - [x] 移动端学生（2026-10-17）— 以 Full 为教师、katamobile b6c96 SFT v3 产出的 10 维特征为输入蒸馏（`nets/katarank_mobile`，±1 42.4%、MAE 2.48、相关 0.80，61 epoch 早停）。上限在特征：同一岭回归基线在 b18 特征上 53.2%、b6c96 特征上 36.8%。按已见手数：每方 30 手相关 0.55、50 手 0.68、整盘 0.80。b6c96 SFT 训练集含验证集 97% 的棋局，指标可能略偏乐观；下次重训 SFT 应按棋局留出本验证集
 
 ### 下一步
+- **Lite / 移动端重新蒸馏** — 以 v3 刻度的 Full 为教师，去掉推理期的输出映射
 - **trunk A/B** — 同一份数据上对比真实 trunk 与清零 trunk，确认 Full 相对 Lite 的价值
 - **数据扩充** — 数据量收益未饱和，更多游戏预期继续改善
 - **模型容量探索** — hidden_dim 128→256, depth+1
